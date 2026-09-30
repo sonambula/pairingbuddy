@@ -38,6 +38,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `/pairingbuddy:code` states that it authorizes the Workflow tool for the workflows named in the coding skill
   - `tests/agents/test_workflow_logic.py` gains `find_unresolved_calls`, which accepts `Workflow('pairingbuddy:<name>')` only when `workflows/<name>.js` exists
   - `classify-task` can no longer ask the human to clarify the task, because it runs in workflow mode
+### Fixed
+
+- PostToolUse hooks (`guardian.mjs`, `solo-progress.mjs`) failed on every tool call on Linux with `ENXIO: no such device or address, open '/dev/stdin'`: Claude Code passes hook stdin as a UNIX socket there, which cannot be opened by path. Both hooks now stream fd 0, and `guardian.mjs` exits cleanly on empty or malformed input (#4)
 
 ## [0.7.0] - 2026-07-31
 
