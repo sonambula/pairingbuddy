@@ -4,7 +4,7 @@
 
 - **Branch:** `spike/dynamic-workflows` (from `main`)
 - **Started:** 2026-10-01
-- **Status:** steps 1 (feasibility) and 2 (`bug_fix` pilot) done; next: decide option A / B / C
+- **Status:** steps 1–3 done (option C chosen); next: migrate agents (step 4)
 
 ## Goal
 
@@ -31,7 +31,19 @@ Replace the current orchestration (Python pseudocode interpreted by the LLM + JS
 - **B:** workflows only for Solo mode; interactive mode stays as is.
 - **C (preferred a priori):** hybrid — the skill orchestrates phases and checkpoints; each human-free phase is a workflow (e.g. RED-GREEN-REFACTOR per test). Human review moves up from the agent to the skill.
 
-Decision: _pending spike results_.
+Decision (2026-10-01): **option C.** See "Step 3 decisions" below.
+
+### Step 3 decisions
+
+1. **Architecture: option C (hybrid).**
+   - Interactive mode: the skill (main context) owns every human checkpoint via AskUserQuestion. Each human-free stretch is a workflow.
+   - Agents with a Human Review step become "propose" agents. They return a proposal through `schema`; the skill reviews it with the human, records corrections in `human-guidance.json`, and passes the decision to the next workflow via `args`.
+   - Solo mode: the same building blocks with no stops, i.e. a single end-to-end workflow (option B falls out as a special case).
+2. **REFACTOR review granularity (new_feature): configurable.**
+   - Default: per test (strict TDD, as today). One workflow per test runs RED → GREEN → identify issues; the skill reviews; a workflow refactors.
+   - Option: batched. One workflow runs RED-GREEN for all pending tests and identifies issues at the end; the human reviews once; one workflow refactors.
+   - Open: where the setting lives (`test-config.json` is about running tests, so probably a separate setting or command flag).
+3. **Skip GREEN when a new test already passes: open, to be discussed with Alberto.** Until decided, prototypes keep the pilot behavior (skip). The current pseudocode calls `implement_code` unconditionally.
 
 ## Plan
 
@@ -42,7 +54,7 @@ Decision: _pending spike results_.
   - [x] How does `agentType: 'pairingbuddy:…'` behave combined with `schema`? → **Works** (see findings)
   - [x] Does a workflow launch under `claude -p` (Solo Buddy) when triggered by a plugin slash command? → **Yes**
 - [x] **2. `bug_fix` pilot**: classify → enumerate → placeholders → implement_tests → implement_code → run_all_tests in one workflow with no intermediate JSON; compare against the current flow.
-- [ ] **3. Decide option A / B / C** based on spike results.
+- [x] **3. Decide option A / B / C** → **C** (see Step 3 decisions)
 - [ ] **4. Migrate agents**: Input = prompt, Output = schema; update `agent-config.yaml` and structure tests. `test_workflow_logic.py` validates the JS script instead of parsing the pseudocode with `ast`.
 - [ ] **5. Generate scripts from `contracts/`** + sync test.
 - [ ] **6. Migrate the rest**: `new_feature`, `refactoring`, `spike`; then `planning`; finally `designing-ux` (the most interactive).
@@ -95,6 +107,12 @@ The nested session called `Workflow({ name: "pairingbuddy:spike-probe" })`. The 
 
 In the headless run, the `pairingbuddy:classify-task` agent ran on `claude-haiku-4-5` (its frontmatter says `model: haiku`), while the agent without `agentType` inherited the session model (Opus). So the per-agent model choices in `agents/*.md` carry over to workflows.
 
+### Task-tool subagents cannot ask the human either (confirmed) — current Human Review is already broken
+
+A `pairingbuddy:curate-guidance` agent launched through the Agent/Task tool (exactly how the coding skill invokes agents today) has no AskUserQuestion: it is neither a direct tool nor a deferred one (`ToolSearch("select:AskUserQuestion")` → "No matching deferred tools found"). This matches the docs ("never available to subagents").
+
+16 of 29 agents have a "Step 3: Human Review" that relies on AskUserQuestion: brainstorm-requirements, create-test-placeholders, curate-guidance, decompose-tracer-bullets, design-ux-explorer, document-spike, enumerate-scenarios-and-test-cases, explore-spike-unit, identify-code-issues, identify-test-issues, scope-refactoring, sequence-tasks, setup-spike, solidify-architecture, update-documentation, verify-test-coverage. **In the current Claude Code (2.1.286) none of them can ask the human mid-run, with or without workflows.** Human review has to move from the agents to the skill (main context) regardless of this migration. The workflow move therefore loses nothing on this front.
+
 ### `bug_fix` pilot vs current flow
 
 `workflows/bug-fix-pilot.js` runs classify → enumerate → placeholders → (implement_tests → implement_code) per test → run_all_tests with all state held in script variables. Agents get a "WORKFLOW MODE" preamble: inputs are inline in the prompt, output goes through `schema`, no `.pairingbuddy/` access, and Human Review is skipped as in Solo mode. The `implement_code` retry-once rule is real code.
@@ -131,3 +149,5 @@ Takeaways:
 - 2026-10-01 — Docs research done: confirms shipping/discovery and the AskUserQuestion block; `agentType` undocumented; headless opt-in risk identified for Solo Buddy.
 - 2026-10-01 — Headless test via `--plugin-dir`: fork workflow discovered by name, runs under `claude -p` from a plugin command, agent frontmatter `model` respected. Step 1 done.
 - 2026-10-01 — `bug_fix` pilot run against current Solo flow on identical sandboxes: same fix, workflow ~2× faster, no state files, no stale-state bug. Step 2 done.
+- 2026-10-01 — Found that Task-tool subagents also lack AskUserQuestion: in-agent Human Review (16 agents) is already non-functional; review must move to the skill either way.
+- 2026-10-01 — Step 3: option C chosen; REFACTOR review granularity configurable (per test by default, batched optional); GREEN skip pending discussion with Alberto.
