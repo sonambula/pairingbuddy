@@ -4,7 +4,7 @@
 
 - **Branch:** `spike/dynamic-workflows` (from `main`)
 - **Started:** 2026-10-01
-- **Status:** step 1 (feasibility) done; next: `bug_fix` pilot
+- **Status:** steps 1 (feasibility) and 2 (`bug_fix` pilot) done; next: decide option A / B / C
 
 ## Goal
 
@@ -41,7 +41,7 @@ Decision: _pending spike results_.
   - [x] Can an agent spawned from a workflow use AskUserQuestion? → **No** (see findings)
   - [x] How does `agentType: 'pairingbuddy:…'` behave combined with `schema`? → **Works** (see findings)
   - [x] Does a workflow launch under `claude -p` (Solo Buddy) when triggered by a plugin slash command? → **Yes**
-- [ ] **2. `bug_fix` pilot**: classify → enumerate → placeholders → implement_tests → implement_code → run_all_tests in one workflow with no intermediate JSON; compare against the current flow.
+- [x] **2. `bug_fix` pilot**: classify → enumerate → placeholders → implement_tests → implement_code → run_all_tests in one workflow with no intermediate JSON; compare against the current flow.
 - [ ] **3. Decide option A / B / C** based on spike results.
 - [ ] **4. Migrate agents**: Input = prompt, Output = schema; update `agent-config.yaml` and structure tests. `test_workflow_logic.py` validates the JS script instead of parsing the pseudocode with `ast`.
 - [ ] **5. Generate scripts from `contracts/`** + sync test.
@@ -95,6 +95,34 @@ The nested session called `Workflow({ name: "pairingbuddy:spike-probe" })`. The 
 
 In the headless run, the `pairingbuddy:classify-task` agent ran on `claude-haiku-4-5` (its frontmatter says `model: haiku`), while the agent without `agentType` inherited the session model (Opus). So the per-agent model choices in `agents/*.md` carry over to workflows.
 
+### `bug_fix` pilot vs current flow
+
+`workflows/bug-fix-pilot.js` runs classify → enumerate → placeholders → (implement_tests → implement_code) per test → run_all_tests with all state held in script variables. Agents get a "WORKFLOW MODE" preamble: inputs are inline in the prompt, output goes through `schema`, no `.pairingbuddy/` access, and Human Review is skipped as in Solo mode. The `implement_code` retry-once rule is real code.
+
+Both flows ran on identical copies of a sandbox project with a seeded bug (`login()` lowercases the email but doesn't strip it; `register()` does both). The baseline was `PAIRINGBUDDY_SOLO=true claude -p --plugin-dir <fork> "Use /pairingbuddy:code to fix this bug: ..."`.
+
+| | Workflow pilot | Current flow (Solo) |
+|---|---|---|
+| Fix | `email.strip().lower()`, identical diff | same |
+| Tests added | 14 (1 RED, 13 passing on write) | 10 (1 RED, 9 passing on write) |
+| Final suite | 18/18 pass | 14/14 pass |
+| Agents | 19 | 27 (+ curate-guidance, update-documentation, commit-changes; implement-code ×10) |
+| Wall-clock | 221 s | 495 s |
+| Orchestrator turns in main context | 1 tool call | 51 turns |
+| Files left in `.pairingbuddy/` | none created | 15 |
+| State bugs | none | stale `test-state.json` between tests: on test 2 the code step checked test_001; the orchestrator improvised a manual reset |
+| Tokens | 838k across subagents | ≈2.2M (mostly cache reads); est. $3.15 |
+
+Caveats: the pilot leaves out curate-guidance, update-documentation and commit, so the agent count and time are not fully like-for-like. Token figures are measured differently on each side.
+
+Takeaways:
+
+- **Correctness is the same, and the workflow is ~2× faster with no main-context orchestration.**
+- **The workflow removes a real class of bugs.** The current flow hit stale JSON state between iterations, which needed improvisation by the orchestrator. In the workflow each iteration's state is a fresh variable.
+- **Behavior divergence to decide:** the pilot skips GREEN when a new test already passes (nothing to implement). The pseudocode calls `implement_code` unconditionally, so the current flow ran it 10 times, 9 of them with nothing to do. Making the skip explicit seems right, but it is a workflow semantics change.
+- **Agent-level issue (independent of orchestration):** for a bug fix, enumerate over-generates. Only 1 test reproduced the bug in either flow; the rest were already green on write. Worth revisiting `enumerate-scenarios-and-test-cases` guidance for `bug_fix`.
+- Side note: the baseline's `solo-progress-errors.log` was full of `ENXIO ... '/dev/stdin'`, the hook bug fixed on `fix/hook-stdin-socket` (not in this branch).
+
 ## Log
 
 - 2026-10-01 — Initial analysis and plan. Branch `spike/dynamic-workflows` created from `main`.
@@ -102,3 +130,4 @@ In the headless run, the `pairingbuddy:classify-task` agent ran on `claude-haiku
 - 2026-10-01 — Probe results: agentType+schema works; AskUserQuestion unavailable in workflow subagents.
 - 2026-10-01 — Docs research done: confirms shipping/discovery and the AskUserQuestion block; `agentType` undocumented; headless opt-in risk identified for Solo Buddy.
 - 2026-10-01 — Headless test via `--plugin-dir`: fork workflow discovered by name, runs under `claude -p` from a plugin command, agent frontmatter `model` respected. Step 1 done.
+- 2026-10-01 — `bug_fix` pilot run against current Solo flow on identical sandboxes: same fix, workflow ~2× faster, no state files, no stale-state bug. Step 2 done.
