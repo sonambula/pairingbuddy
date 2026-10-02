@@ -31,6 +31,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Args: `project_root` (required), `task?`, `human_guidance?`, `previous_proposal?`, `human_feedback?`; returns `{ proposal }` and writes no file
   - Bootstraps an empty guidance when none is given; on a re-run the previous proposal and the human feedback are added with an instruction to revise the proposal accordingly
   - Wiring into the coding skill comes in Task 7
+- `tests/skills/test_curate_guidance_integration.py`: structural tests for the curate-guidance wiring in the coding skill (workflow call and args at both sites, `## Review loop` section, verbatim proposal write) (TB1.2 Task 7)
 
 ### Changed
 
@@ -43,6 +44,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `/pairingbuddy:code` states that it authorizes the Workflow tool for the workflows named in the coding skill
   - `tests/agents/test_workflow_logic.py` gains `find_unresolved_calls`, which accepts `Workflow('pairingbuddy:<name>')` only when `workflows/<name>.js` exists
   - `classify-task` can no longer ask the human to clarify the task, because it runs in workflow mode
+- The coding skill runs curate-guidance through the `pairingbuddy:curate-guidance` workflow followed by the new `## Review loop` section, in both the plan-execution and normal paths, instead of the `curate-guidance` agent
+  - The Review loop is defined once; the human review runs in the main context, and the skill is the sole writer of `human-guidance.json`, appending feedback immediately and writing the approved proposal verbatim
+  - `Review loop` is listed in the coding skill's sections in `contracts/skill-config.yaml`
+
 ### Fixed
 
 - PostToolUse hooks (`guardian.mjs`, `solo-progress.mjs`) failed on every tool call on Linux with `ENXIO: no such device or address, open '/dev/stdin'`: Claude Code passes hook stdin as a UNIX socket there, which cannot be opened by path. Both hooks now stream fd 0, and `guardian.mjs` exits cleanly on empty or malformed input (#4)

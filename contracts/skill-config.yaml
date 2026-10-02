@@ -42,6 +42,7 @@ skills:
           - heading: "### Plan Execution Mode"
           - heading: "### Resume and Plan Modifications"
           - heading: "### Error Handling"
+      - heading: "## Review loop"
 
   # ---------------------------------------------------------------------------
   # Bootstrap

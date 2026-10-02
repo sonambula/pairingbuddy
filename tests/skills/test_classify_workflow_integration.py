@@ -63,8 +63,12 @@ def first_arg_literal(call: ast.Call) -> str | None:
     return None
 
 
+def workflow_calls_named(tree: ast.AST, name: str) -> list[ast.Call]:
+    return [c for c in workflow_calls(tree) if first_arg_literal(c) == name]
+
+
 def classify_calls(tree: ast.AST) -> list[ast.Call]:
-    return [c for c in workflow_calls(tree) if first_arg_literal(c) == CLASSIFY_WORKFLOW_NAME]
+    return workflow_calls_named(tree, CLASSIFY_WORKFLOW_NAME)
 
 
 def enclosing_statement(node: ast.AST, parents: dict) -> ast.stmt:
@@ -129,10 +133,10 @@ def dict_entries(node: ast.Dict) -> dict[str, tuple[ast.expr, bool]]:
     }
 
 
-def resolve_classify_args(
-    call: ast.Call, parents: dict
+def resolve_workflow_args(
+    call: ast.Call, parents: dict, label: str
 ) -> tuple[dict[str, tuple[ast.expr, bool]], list[str]]:
-    """Resolve the args of one classify call from the statements preceding it.
+    """Resolve the args of one Workflow call from the statements preceding it.
 
     Only the call's own sibling statement list is read. Returns (entries, problems);
     entries maps each key to (value, guarded) where guarded means the key is only
@@ -142,7 +146,7 @@ def resolve_classify_args(
     if isinstance(expr, ast.Dict):
         return dict_entries(expr), []
     if not isinstance(expr, ast.Name):
-        return {}, [f"classify call on line {call.lineno} has no resolvable args"]
+        return {}, [f"{label} call on line {call.lineno} has no resolvable args"]
     stmt = enclosing_statement(call, parents)
     siblings = sibling_list(stmt, parents)
     entries: dict[str, tuple[ast.expr, bool]] = {}
@@ -167,7 +171,7 @@ def resolve_classify_args(
                 entries[key] = (node.value, True)
             elif key is not None:
                 problems.append(
-                    f"classify call on line {call.lineno}: args key {key!r} is added "
+                    f"{label} call on line {call.lineno}: args key {key!r} is added "
                     "only under the human-guidance condition"
                 )
     return entries, problems
@@ -176,7 +180,7 @@ def resolve_classify_args(
 def classify_args_by_call() -> list[tuple[ast.Call, dict, list[str]]]:
     _, tree = parse_workflow()
     parents = parent_map(tree)
-    return [(c, *resolve_classify_args(c, parents)) for c in classify_calls(tree)]
+    return [(c, *resolve_workflow_args(c, parents, "classify")) for c in classify_calls(tree)]
 
 
 def run_checks(check, checks: dict, *fixtures) -> None:

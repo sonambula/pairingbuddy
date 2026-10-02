@@ -51,6 +51,7 @@ The Workflow section below contains Python pseudocode - a specification, not exe
 - **Variable names** map to JSON file paths (see State File Mappings)
 - **Underscores** in function names become **hyphens** in agent names
   - `enumerate_scenarios_and_test_cases()` → agent `enumerate-scenarios-and-test-cases`
+- A `# Review loop` comment on the line right after `x = Workflow(...)` means: apply the Review loop section to `x` before continuing. Each re-run rebinds `x`. The statements after the comment run only on approval, with `x` holding the approved result.
 
 ### Agent Invocation
 
@@ -134,7 +135,12 @@ if _detect_plan_file(task):
         task = {"description": plan_task.description, "context": plan_task.context}
 
         # Run normal TDD workflow for this task (falls through to code below)
-        human_guidance = curate_guidance(human_guidance, task)
+        curate_args = {"project_root": _absolute_project_root(), "task": task}
+        if _file_exists(".pairingbuddy/human-guidance.json"):
+            curate_args["human_guidance"] = _read_json(".pairingbuddy/human-guidance.json")
+        curation = Workflow('pairingbuddy:curate-guidance', args=curate_args)
+        # Review loop
+        _write_json(".pairingbuddy/human-guidance.json", curation.proposal)
         _cleanup_state_files()
         classify_args = {"project_root": _absolute_project_root(), "task": task}
         if _file_exists(".pairingbuddy/human-guidance.json"):
@@ -160,7 +166,12 @@ if _detect_plan_file(task):
 # Normal (non-plan) execution continues below
 
 # Curate guidance from previous session (always runs - handles review and bootstrap)
-human_guidance = curate_guidance(human_guidance, task)
+curate_args = {"project_root": _absolute_project_root(), "task": task}
+if _file_exists(".pairingbuddy/human-guidance.json"):
+    curate_args["human_guidance"] = _read_json(".pairingbuddy/human-guidance.json")
+curation = Workflow('pairingbuddy:curate-guidance', args=curate_args)
+# Review loop
+_write_json(".pairingbuddy/human-guidance.json", curation.proposal)
 
 # Clean up stale state files from previous task (MANDATORY - do not skip)
 _cleanup_state_files()
@@ -306,16 +317,16 @@ if _ask_human("All tests pass. Commit changes?"):
 ### State File Management
 
 1. At cycle start, verify `.pairingbuddy/` is in `.gitignore`
-2. Invoke `curate_guidance` agent (before cleanup):
+2. Run the `pairingbuddy:curate-guidance` workflow and apply the Review loop (before cleanup):
    - If `human-guidance.json` has entries: review/curate existing guidance
    - If empty or missing: offer to add new persistent guidance
    - Approved entries get `"persistent": true` flag
+   - The skill is the only writer of `human-guidance.json`; it writes the approved proposal verbatim
 3. Delete all `.pairingbuddy/*.json` EXCEPT `test-config.json`, `doc-config.json`, and `human-guidance.json`
-4. If `human-guidance.json` doesn't exist after curation, initialize with `{"guidance": []}`
-5. Keep files after run for human review
+4. Keep files after run for human review
 
 **Note:** `human-guidance.json` serves two purposes:
-- **Session feedback:** Agents with Human Review checkpoints append corrections during the task
+- **Session feedback:** Corrections are appended during the task, by the skill in the Review loop and by agents that still run their own Human Review step
 - **Persistent guidance:** Entries with `"persistent": true` survive cleanup and carry over to future tasks (operational knowledge, coding preferences, project conventions)
 
 ### Human Checkpoints
@@ -470,3 +481,15 @@ After session ends (completion or stop):
 3. If push fails, log the failure but don't stop — the work is already committed locally
 
 Note: `SOLO_BUDDY_REPORT.md` lives in `.pairingbuddy/` which is gitignored. It is a local artifact for the human to review, not committed to the repository.
+
+## Review loop
+
+Stage workflows return a proposal and never talk to the human. The skill reviews each proposal with the human as follows:
+
+1. Run the stage workflow and get the proposal.
+2. Present the proposal with `AskUserQuestion`, including all relevant details.
+3. On feedback, immediately append an entry to `.pairingbuddy/human-guidance.json` with `agent`, an ISO `timestamp`, `context` and `feedback`, then re-run the same stage workflow passing `human_feedback`, `previous_proposal` and the updated guidance in its args, and go back to step 2.
+4. On approval, pass the approved object to the next stage.
+5. On termination, stop the task with `_stop(...)` and do not run the next stage.
+
+**Solo note:** In Solo mode (`PAIRINGBUDDY_SOLO=true`) the proposal is approved automatically: skip steps 2-3. The Solo wiring comes later.

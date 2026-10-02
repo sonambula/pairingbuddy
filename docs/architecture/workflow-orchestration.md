@@ -80,6 +80,8 @@ Agents that have a "Human Review" step (16 of 29) become **propose** agents. The
 3. On feedback: append it to `human-guidance.json` immediately, re-run the same stage with the feedback and updated guidance in `args`, and go back to step 2.
 4. On approval: pass the approved object to the next stage. On termination: stop.
 
+In the coding skill this loop is defined once, in a `## Review loop` section. Each checkpoint in the pseudocode carries a `# Review loop` comment right after its `Workflow(...)` call, meaning: apply that section to the result before continuing.
+
 Solo mode skips steps 2–3 and treats every proposal as approved.
 
 ## Workflow Building Blocks
