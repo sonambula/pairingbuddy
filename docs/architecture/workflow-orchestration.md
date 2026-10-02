@@ -123,12 +123,17 @@ Workflow scripts cannot read or import files, so the shared code is inlined in e
 ...args normalization, WORKFLOW MODE preamble, run(agent, phase, inputs, schema, label)...
 // </generated:helper>
 
-// <generated:schemas> — do not edit; regenerate from contracts/schemas
+// <generated:schemas scenarios tests> — do not edit; regenerate from contracts/schemas
 const SCENARIOS = { ... }
 // </generated:schemas>
 ```
 
-- The workflow logic is written by hand. A generator script fills the blocks from `contracts/schemas/` and `contracts/agent-config.yaml`.
+- The workflow logic is written by hand. A generator script, `scripts/generate_workflow_blocks.py`, fills the blocks. Only the schemas block is implemented so far (from `contracts/schemas/`); the helper block is a later task.
+- **Generator CLI:** `uv run python scripts/generate_workflow_blocks.py [--schemas-dir DIR] [--workflows-dir DIR] [--check] [paths...]`. With no paths it processes every `*.js` in the workflows dir (default `workflows/`); explicit paths ignore `--workflows-dir`. `--schemas-dir` and `--workflows-dir` exist mainly so tests can use temp files.
+- **Schemas block:** the opening marker lists schema names; each loads `<schemas-dir>/<name>.schema.json` and is emitted as `const UPPER_SNAKE = <json>;`. `$schema` and `$id` are stripped; `title` and `description` are kept.
+- **Key order:** the source file's key order is preserved at every level, not sorted, so output is deterministic and diffs against the contract stay readable. Indent is 2 spaces.
+- **Writes:** only text between the markers changes (everything outside is byte-preserved). The block is rendered before the file is touched, and unchanged files are not rewritten. `--check` writes nothing and prints `stale: <path>` per stale file.
+- **Errors and exit codes:** problems are reported per file as `error: ...` on stderr and the run continues with the remaining paths. They cover unknown, invalid or unreadable schemas; misordered, nested or unclosed markers (ordered scan); unreadable or unwritable targets; and a missing or non-directory workflows dir. Exit 2 if any error, else 1 if anything is stale in `--check`, else 0.
 - A pytest sync test fails if any block differs from what the generator would produce.
 - **Single helper (R15):** every `agentType` call goes through `run()`, so the undocumented `agentType` surface is isolated to one generated block.
 - **WORKFLOW MODE preamble (R3):** on the long-lived branch, agents keep their file-based markdown. Workflow mode is supplied only by the preamble in the helper, so flows that are not yet migrated keep running on the same agents. Slice 4 migrates agent contracts to prompt-in / schema-out and the preamble is removed. Nothing that works both ways ships.

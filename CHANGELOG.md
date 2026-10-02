@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Workflow block generator `scripts/generate_workflow_blocks.py` (dynamic workflows migration, TB1.1 Task 1)
+  - Run with `uv run python scripts/generate_workflow_blocks.py [--schemas-dir DIR] [--workflows-dir DIR] [--check] [paths...]`; with no paths it processes every `*.js` in the workflows dir (default `workflows/`)
+  - Fills `<generated:schemas name...>` marker blocks with `const UPPER_SNAKE = <json>` loaded from `contracts/schemas/<name>.schema.json`; strips `$schema` and `$id`, preserves the source file's key order (not sorted), 2-space indent
+  - Only the text between markers is rewritten (byte-preserving outside; unchanged files are not rewritten)
+  - `--check` writes nothing and reports `stale: <path>`
+  - Per-file errors (unknown, invalid or unreadable schema; misordered, nested or unclosed markers; unreadable or unwritable target; missing workflows dir) are reported and the run continues; exit 2 on any error, else 1 if stale in `--check`, else 0
+  - Tests in `tests/scripts/test_generate_workflow_blocks.py`
+
 ## [0.7.0] - 2026-07-31
 
 ### Added

@@ -170,6 +170,14 @@ Takeaways:
 - **Agent-level issue (independent of orchestration):** for a bug fix, enumerate over-generates. Only 1 test reproduced the bug in either flow; the rest were already green on write. Worth revisiting `enumerate-scenarios-and-test-cases` guidance for `bug_fix`.
 - Side note: the baseline's `solo-progress-errors.log` was full of `ENXIO ... '/dev/stdin'`, the hook bug fixed on `fix/hook-stdin-socket` (not in this branch).
 
+## Known limitations
+
+Workflow block generator (`scripts/generate_workflow_blocks.py`):
+
+- Writes are not atomic. The target file is written directly; a crash mid-write could leave it partial. The human declined temp-file + rename. Recovery is `git checkout` and re-running the generator.
+- An unreadable (permission-denied) workflows directory makes the glob return nothing, so the run exits 0.
+- There is a small race between the `exists()` and `is_dir()` checks on the workflows dir.
+
 ## Log
 
 - 2026-10-01 — Initial analysis and plan. Branch `spike/dynamic-workflows` created from `main`.
@@ -185,3 +193,4 @@ Takeaways:
   - shared helper and schemas are inlined as generated marker blocks with a sync test;
   - `contracts/schemas/` stays the source of truth, keeping the persistent-file and agent-output schemas and removing the input-only and unused ones;
   - inline schema copies in `agents/*.md` are removed in slice 4.
+- 2026-10-02 — TB1.1 Task 1: workflow block generator (schemas block + `--check`) implemented with 20 test cases (40 runs). Decisions: `--schemas-dir` and `--workflows-dir` options for test isolation; source key order preserved (not sorted); continue-on-error with exit 2/1/0; `$schema`/`$id` stripped; per-file errors including unknown/invalid/unreadable schemas, misordered/nested/unclosed markers, and unreadable/unwritable targets. Process findings: scope grew from 13 to 20 cases through review-driven decisions, and `files-changed.json` kept being overwritten by refactor agents (another JSON-state bug the migration removes).
