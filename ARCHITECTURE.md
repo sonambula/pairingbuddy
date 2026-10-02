@@ -2,6 +2,8 @@
 
 > Your pair programming companion for test-driven development and clean architecture.
 
+> **Migration in progress:** on branch `spike/dynamic-workflows`, orchestration is moving to Workflow scripts. The target architecture is in [docs/architecture/workflow-orchestration.md](docs/architecture/workflow-orchestration.md). This document will be rewritten from it when the migration's cleanup slice lands.
+
 ## Table of Contents
 
 - [Overview](#overview)

@@ -4,7 +4,8 @@
 
 - **Branch:** `spike/dynamic-workflows` (from `main`)
 - **Started:** 2026-10-01
-- **Status:** steps 1–3 done (option C chosen); next: migrate agents (step 4)
+- **Status:** spike done (option C chosen); migration planned in 5 slices; next: slice 1 (bug_fix interactive)
+- **Target architecture:** [docs/architecture/workflow-orchestration.md](../architecture/workflow-orchestration.md)
 
 ## Goal
 
@@ -55,10 +56,36 @@ Decision (2026-10-01): **option C.** See "Step 3 decisions" below.
   - [x] Does a workflow launch under `claude -p` (Solo Buddy) when triggered by a plugin slash command? → **Yes**
 - [x] **2. `bug_fix` pilot**: classify → enumerate → placeholders → implement_tests → implement_code → run_all_tests in one workflow with no intermediate JSON; compare against the current flow.
 - [x] **3. Decide option A / B / C** → **C** (see Step 3 decisions)
-- [ ] **4. Migrate agents**: Input = prompt, Output = schema; update `agent-config.yaml` and structure tests. `test_workflow_logic.py` validates the JS script instead of parsing the pseudocode with `ast`.
-- [ ] **5. Generate scripts from `contracts/`** + sync test.
-- [ ] **6. Migrate the rest**: `new_feature`, `refactoring`, `spike`; then `planning`; finally `designing-ux` (the most interactive).
-- [ ] **7. Cleanup**: guardian, intermediate-file schemas, `_cleanup_state_files`, State File Mappings table; update `ARCHITECTURE.md` and `CHANGELOG.md`.
+
+### Migration slices
+
+All slices land on one long-lived branch and ship as a **single breaking release**: no merge per slice, and the old and new paths are never shipped side by side. Until slice 4, agents keep their file-based contract. Workflows supply workflow mode through the WORKFLOW MODE preamble in a shared helper, so flows that are not yet migrated keep working. Target architecture: [docs/architecture/workflow-orchestration.md](../architecture/workflow-orchestration.md). The detailed task plan is local (`docs/plans/` is gitignored).
+
+- [ ] **Slice 1 — `bug_fix`, interactive mode only.**
+  - The skill owns curate-guidance and every review checkpoint (full review loop, corrections recorded in `human-guidance.json`).
+  - Every agent runs inside a workflow, including single-agent steps: curate-guidance, classify, `bug-fix-enumerate`, `bug-fix-placeholders`, `bug-fix-red-green` (per test, with retry-once and then run-all-tests), update-documentation, commit.
+  - Schemas are generated into marker blocks from `contracts/` from day one, with a sync test.
+  - A single `run()` helper isolates `agentType`.
+  - `tests/workflows/` replaces the `ast` checks in `test_workflow_logic.py`. An inline spike decides how far JS testing goes.
+  - No `.pairingbuddy/` files beyond the persistent ones.
+- [ ] **Slice 2 — Solo observability spike, then `new_feature` + Solo.**
+  - The spike checks whether PostToolUse hooks see agents inside workflows, and what the renderer reads instead of `task.json` and the guardian session file.
+  - `new_feature` gets configurable REFACTOR review granularity (per test by default, batched as an option) and a deterministic coverage-gap loop.
+  - Solo runs one end-to-end workflow per plan task via `solo-buddy.sh` → `/pairingbuddy:code`, keeping checkbox resume, the report, PR creation and stop-on-failure.
+  - Plan execution mode in `/code` runs on top of workflows.
+- [ ] **Slice 3 — `refactoring` + `spike`, then `planning`, then `designing-ux`** (the most interactive). The design schemas are reviewed here: input-only and unused ones are candidates for removal.
+- [ ] **Slice 4 — Agent contract migration.** Once no orchestrator uses state files, all agents move to prompt-in / schema-out in one step:
+  - update `agent-config.yaml`, `agents/*.md` and the structure tests;
+  - remove the inline schema copies from `agents/*.md` (StructuredOutput already shows the schema);
+  - remove the WORKFLOW MODE preamble.
+- [ ] **Slice 5 — Cleanup and release.**
+  - Remove `_cleanup_state_files`, the State File Mappings table, and the input-only schemas (`task`, `current-batch`, `current-unit`).
+  - Slim the guardian to skill-level orchestration reminders.
+  - Remove the pilot and probe workflows.
+  - Rewrite `ARCHITECTURE.md`.
+  - Add breaking-change and migration notes to `CHANGELOG.md` (minimum Claude Code version, Workflow opt-in, removed state files).
+
+Open: GREEN-skip and where REFACTOR granularity is configured (both with Alberto), and `agentType` stability / minimum Claude Code version (at release).
 
 ## Spike findings
 
@@ -153,3 +180,8 @@ Takeaways:
 - 2026-10-01 — `bug_fix` pilot run against current Solo flow on identical sandboxes: same fix, workflow ~2× faster, no state files, no stale-state bug. Step 2 done.
 - 2026-10-01 — Found that Task-tool subagents also lack AskUserQuestion: in-agent Human Review (16 agents) is already non-functional; review must move to the skill either way.
 - 2026-10-01 — Step 3: option C chosen; REFACTOR review granularity configurable (per test by default, batched optional); GREEN skip pending discussion with Alberto.
+- 2026-10-01 — Planning: the migration is split into 5 slices on one long-lived branch, shipped as a single breaking release (Plan section rewritten). Target architecture written to `docs/architecture/workflow-orchestration.md`. Decisions:
+  - all agent calls in migrated flows run inside workflows, including single-agent steps;
+  - shared helper and schemas are inlined as generated marker blocks with a sync test;
+  - `contracts/schemas/` stays the source of truth, keeping the persistent-file and agent-output schemas and removing the input-only and unused ones;
+  - inline schema copies in `agents/*.md` are removed in slice 4.
