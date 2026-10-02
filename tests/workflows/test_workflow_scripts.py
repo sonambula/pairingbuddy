@@ -144,16 +144,6 @@ def test_classify_structure(check):
     check(text)
 
 
-@pytest.mark.parametrize("pattern", FORBIDDEN.values(), ids=FORBIDDEN.keys())
-def test_classify_forbidden_constructs_absent(pattern):
-    """classify-structure: classify.js outside generated blocks avoids forbidden constructs."""
-    text = normalized_script("classify")
-
-    found = re.search(pattern, text)
-
-    assert found is None, f"forbidden construct in classify.js: {found.group(0)!r}"
-
-
 # ---- per-script checkers (each returns a list of problem messages) -----------
 
 SCRIPT_PATHS = sorted(WORKFLOWS_DIR.glob("*.js"))
@@ -498,3 +488,234 @@ def test_checker_reports_each_violation(synthetic_script, mutate, checker, expec
 
     assert len(problems) == 1, f"expected exactly one problem, got {problems}"
     assert expected in problems[0], problems
+
+
+# ---- curate-guidance structure ----------------------------------------------
+
+
+def curate_body():
+    """curate-guidance.js outside generated blocks and meta, comments removed, normalized."""
+    raw = strip_generated_blocks(read_script("curate-guidance"))
+    raw = re.sub(r"/\*.*?\*/", "", raw, flags=re.DOTALL)
+    raw = re.sub(r"(?m)(^|\s)//[^\n]*", r"\1", raw)
+    return without_meta(normalize_js(raw))
+
+
+def without_meta(text):
+    """Drop the `export const meta = {...}` declaration from normalized script text."""
+    meta = re.search(r"export const meta = \{", text)
+    assert meta, "no `export const meta = {` found"
+    return text[: meta.start()] + text[meta.end() + len(extract_meta(text)) + 1 :]
+
+
+def balanced_end(text, open_index):
+    """Index of the bracket closing the one at open_index (string literals skipped)."""
+    pairs = {"(": ")", "[": "]", "{": "}"}
+    depth, quote = 0, False
+    for index in range(open_index, len(text)):
+        char = text[index]
+        if char == '"':
+            quote = not quote
+        elif quote:
+            continue
+        elif char in pairs:
+            depth += 1
+        elif char in pairs.values():
+            depth -= 1
+            if depth == 0:
+                return index
+    raise AssertionError(f"unbalanced bracket at {open_index}")
+
+
+def string_literals(text):
+    return re.findall(r'"([^"]*)"', text)
+
+
+def check_require_args_project_root(text):
+    run = re.search(r"\brun\(", text)
+    calls = list(re.finditer(r"\brequireArgs\(", text))
+    assert run, "run( is never called"
+    assert calls, "requireArgs( is never called"
+    for call in calls:
+        args = text[call.end() : balanced_end(text, call.end() - 1)]
+        if "project_root" in string_literals(args) and call.start() < run.start():
+            return
+    raise AssertionError('no requireArgs(..."project_root"...) call before run(')
+
+
+HUMAN_GUIDANCE_FALLBACK = "ARGS.human_guidance || { guidance: [] }"
+
+
+def human_guidance_alias(text):
+    """Name the human_guidance fallback is bound to, or None when it is used inline."""
+    match = re.search(r"\bconst (\w+) = " + re.escape(HUMAN_GUIDANCE_FALLBACK), text)
+    return match.group(1) if match else None
+
+
+def check_human_guidance_fallback_feeds_block(text):
+    alias = human_guidance_alias(text)
+    values = [re.escape(HUMAN_GUIDANCE_FALLBACK)] + ([rf"{alias}\b"] if alias else [])
+    assert re.search(rf'\bblock\("human_guidance", (?:{"|".join(values)})\)', text), (
+        'block("human_guidance", ...) is not built from ' + HUMAN_GUIDANCE_FALLBACK
+    )
+
+
+def check_no_throw_on_missing_human_guidance(text):
+    alias = human_guidance_alias(text)
+    names = r"(?:ARGS\.human_guidance\b" + (rf"|\b{alias}\b" if alias else "") + ")"
+    for call in re.finditer(r"\brequireArgs\(", text):
+        args = text[call.end() : balanced_end(text, call.end() - 1)]
+        assert "human_guidance" not in string_literals(args), "requireArgs demands human_guidance"
+    for guard in re.finditer(r"\bif \(", text):
+        end = balanced_end(text, guard.end() - 1)
+        branch = text[end + 1 : end + 1 + 40]
+        if re.search(names, text[guard.end() : end]):
+            assert not re.match(r"\s*(?:\{ )?throw\b", branch), "throws on missing human_guidance"
+    assert not re.search(names + r" \|\| [^;]*\bthrow\b", text), "throw in human_guidance fallback"
+
+
+def guarded_branches(text):
+    """Yield (condition, branch body) for braced `if`, `cond ? [..]` and `cond && [..]` forms."""
+    for guard in re.finditer(r"\bif \(", text):
+        end = balanced_end(text, guard.end() - 1)
+        if text[end + 1 : end + 3] == " {":
+            body_end = balanced_end(text, end + 2)
+            yield text[guard.end() : end], text[end + 3 : body_end]
+    for guard in re.finditer(r"([\w.!&| ]+?) (?:\?|&&) (?=\[)", text):
+        body_end = balanced_end(text, guard.end())
+        yield guard.group(1).strip(), text[guard.end() + 1 : body_end]
+
+
+def branch_guards(text, block_name):
+    """Return the (condition, body) branches that contain a block(block_name, ...) call."""
+    call = rf'\bblock\("{block_name}", '
+    return [(cond, body) for cond, body in guarded_branches(text) if re.search(call, body)]
+
+
+def truthy_guard(own):
+    """Regex for a condition that is a plain (or double-negated) truthy check on its own arg."""
+    return rf"(?:!!)?\(?(?:ARGS && )?(?:{own})\)?"
+
+
+def check_rerun_block_guarded_with_revise(text, block_name):
+    branches = branch_guards(text, block_name)
+    assert branches, f"block({block_name!r}, ...) is not inside a guarded branch"
+    alias = re.search(rf"\bconst (\w+) = ARGS\.{block_name}\b", text)
+    own = rf"ARGS\.{block_name}" + (rf"|{alias.group(1)}" if alias else "")
+    for condition, body in branches:
+        assert re.fullmatch(truthy_guard(own), condition), (
+            f"block({block_name!r}) is guarded by {condition!r}, not by its own arg"
+        )
+        without_blocks = re.sub(r'\bblock\("\w+", ', "(", body)
+        instructions = [lit for lit in string_literals(without_blocks) if " " in lit.strip()]
+        assert instructions, f"guarded {block_name} branch has no instruction string literal"
+
+
+def check_curate_run_call_and_return(text):
+    match = re.search(
+        r'\bconst proposal = await run\("curate-guidance", "Curate", inputs, HUMAN_GUIDANCE\)',
+        text,
+    )
+    assert match, (
+        "no `const proposal = await run('curate-guidance', 'Curate', inputs, HUMAN_GUIDANCE)`"
+    )
+    assert len(re.findall(r"\brun\(", text)) == 1, "run( must be called exactly once"
+    returns = re.findall(r"\breturn\b(?: \{[^}]*\}|[^;}]*)", text)
+    assert [r.strip() for r in returns] == ["return { proposal }"], f"returns are {returns}"
+
+
+def check_curate_meta_phases(text):
+    phases = top_level_fields(extract_meta(normalize_js(text))).get("phases")
+    assert phases == '[{ title: "Curate" }]', f"meta.phases is {phases}"
+
+
+BOOTSTRAP_CHECKS = {
+    "fallback-feeds-human-guidance-block": check_human_guidance_fallback_feeds_block,
+    "no-throw-on-missing-human-guidance": check_no_throw_on_missing_human_guidance,
+}
+
+
+def test_require_args_project_root():
+    """require-args-project-root: requireArgs names project_root before run()."""
+    text = curate_body()
+
+    check_require_args_project_root(text)
+
+
+@pytest.mark.parametrize("check", BOOTSTRAP_CHECKS.values(), ids=BOOTSTRAP_CHECKS.keys())
+def test_bootstrap_without_human_guidance(check):
+    """bootstrap-without-human-guidance: falls back to { guidance: [] }, never throws."""
+    text = curate_body()
+
+    check(text)
+
+
+@pytest.mark.parametrize("block_name", ["previous_proposal", "human_feedback"])
+def test_rerun_blocks_and_revise_instruction(block_name):
+    """rerun-blocks-and-revise-instruction: rerun blocks guarded by their own arg."""
+    text = curate_body()
+
+    check_rerun_block_guarded_with_revise(text, block_name)
+
+
+def test_rerun_guard_rejects_inverted_condition():
+    """rerun-blocks-and-revise-instruction: an inverted guard is a defect, not a guard."""
+    control = curate_body()
+    mutated = control.replace("if (ARGS.previous_proposal) {", "if (!ARGS.previous_proposal) {")
+    assert mutated != control, "mutation did not apply"
+    check_rerun_block_guarded_with_revise(control, "previous_proposal")
+
+    with pytest.raises(AssertionError, match="not by its own arg"):
+        check_rerun_block_guarded_with_revise(mutated, "previous_proposal")
+
+
+def test_run_call_and_return_shape():
+    """run-call-and-return-shape: exact run call, returns { proposal }, phases Curate."""
+    check_curate_run_call_and_return(curate_body())
+    check_curate_meta_phases(read_script("curate-guidance"))
+
+
+def check_task_block_guarded_by_own_arg(text):
+    """block('task', ...) is fed from ARGS.task and sits only in a truthy guard on it."""
+    alias = re.search(r"\bconst (\w+) = ARGS\.task(?![\w.])", text)
+    own = r"ARGS\.task" + (rf"|{alias.group(1)}" if alias else "")
+    calls = re.findall(r'\bblock\("task", ([^)]*)\)', text)
+    assert calls, 'no block("task", ...) call'
+    for value in calls:
+        assert re.fullmatch(own, value), f"block('task', {value}) is not fed from ARGS.task"
+    branches = branch_guards(text, "task")
+    assert branches, "block('task', ...) is not inside a guarded branch"
+    for condition, _ in branches:
+        assert re.fullmatch(truthy_guard(own), condition), (
+            f"block('task') is guarded by {condition!r}, not by a truthy check on its own arg"
+        )
+
+
+def check_when_to_use_lists_optional_task(text):
+    """meta.whenToUse names `task?` as an exact token in its args list."""
+    fields, problems = meta_fields(text)
+    assert not problems, problems
+    args_list = re.search(r"\bargs \{([^}]*)\}", meta_string_field(fields, "whenToUse"))
+    assert args_list, "meta.whenToUse has no `args {...}` list"
+    names = [name.strip() for name in args_list.group(1).split(",")]
+    assert "task?" in names, f"meta.whenToUse args are {names}, no `task?`"
+
+
+def test_optional_task_block():
+    """optional-task-block: task block is optional, guarded by its own arg, documented."""
+    check_task_block_guarded_by_own_arg(curate_body())
+    check_when_to_use_lists_optional_task(read_script("curate-guidance"))
+
+
+NON_SPIKE_PATHS = [path for path in SCRIPT_PATHS if path.stem not in KNOWN_SPIKE_FILES]
+
+
+@pytest.mark.parametrize("pattern", FORBIDDEN.values(), ids=FORBIDDEN.keys())
+@pytest.mark.parametrize("path", NON_SPIKE_PATHS, ids=[path.stem for path in NON_SPIKE_PATHS])
+def test_forbidden_constructs_absent_in_every_workflow(path, pattern):
+    """forbidden-constructs-absent-in-every-workflow: no agentType or inline schema by hand."""
+    text = normalized_script(path.stem)
+
+    found = re.search(pattern, text)
+
+    assert found is None, f"forbidden construct in {path.name}: {found.group(0)!r}"

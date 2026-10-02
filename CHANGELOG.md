@@ -27,9 +27,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `meta` has `name`, `description`, `whenToUse` and non-empty `phases`; `meta.name` matches the file stem
   - Generated blocks are in sync (via the generator's `process_path`); spike files `bug-fix-pilot.js` and `spike-probe.js` are tolerated, with a per-file `whenToUse` exemption until TB5.1
   - Regex structural checks normalize formatting and anchor to their construct, validated by mutation probes
+- `workflows/curate-guidance.js`: curate-guidance as a workflow (dynamic workflows migration, TB1.2 Task 6)
+  - Args: `project_root` (required), `task?`, `human_guidance?`, `previous_proposal?`, `human_feedback?`; returns `{ proposal }` and writes no file
+  - Bootstraps an empty guidance when none is given; on a re-run the previous proposal and the human feedback are added with an instruction to revise the proposal accordingly
+  - Wiring into the coding skill comes in Task 7
 
 ### Changed
 
+- The structural check for forbidden constructs in `tests/workflows/` now covers every non-spike workflow, not only `classify.js`
 - Node.js >= 18 is now a hard requirement for the plugin (hooks) and its tests: `tests/conftest.py` stops the session with a clear message when node is missing or too old, and no test skips for lack of node (supersedes the earlier skip rule)
 - pytest `pythonpath = ["."]` so tests can import the shared `tests.js_syntax` helper; the generator's helper `node --check` test now uses it
 - Task classification runs as a workflow (`pairingbuddy:classify`) instead of the `classify-task` agent, in both the plan-execution and normal paths of the coding skill
