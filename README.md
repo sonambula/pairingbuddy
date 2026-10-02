@@ -4,6 +4,10 @@ Your pair programming companion for test-driven development and clean architectu
 
 A Claude Code plugin that enforces TDD, SOLID, and Clean Code practices. Plan features with tracer bullet methodology, design UX systems, and build with full TDD workflows. Human review checkpoints keep you in control.
 
+## Requirements
+
+- Node.js >= 18 (the plugin's hooks run on node)
+
 ## Installation
 
 ```bash

@@ -142,11 +142,14 @@ const SCENARIOS = { ... }
 
 ## Testing
 
-- `tests/workflows/` replaces the `ast` parsing of the Python pseudocode in `tests/agents/test_workflow_logic.py`. Planned checks:
-  - every `agentType: 'pairingbuddy:<x>'` resolves to an agent in `agent-config.yaml`;
-  - required `meta` fields are present;
-  - generated blocks are in sync;
-  - `node --check` passes.
+- `tests/workflows/` replaces the `ast` parsing of the Python pseudocode in `tests/agents/test_workflow_logic.py`. It is parameterized over `workflows/*.js`, so every new workflow is covered automatically:
+  - Syntax: the script is checked with `node --check` as an async-function body, because `node --check` on a file containing `export` is vacuous on Node 24.
+  - Agent names: every `agentType: 'pairingbuddy:<x>'` and every literal `run('<x>'` resolves to an agent in `agent-config.yaml`.
+  - `meta`: `name`, `description`, `whenToUse` and a non-empty `phases` are present, and `meta.name` matches the file stem.
+  - Sync: generated blocks are in sync, checked through the generator's `process_path`.
+  - Spike files `bug-fix-pilot.js` and `spike-probe.js` have no markers and are tolerated, with a per-file `whenToUse` exemption, until TB5.1 deletes them. Any other file without markers is flagged.
+  - `classify.js` also gets construct-level structural checks. They normalize formatting and anchor each check to its construct; mutation probes confirmed they reject real defects.
+- Node.js >= 18 is a hard requirement of the plugin (hooks) and of the tests. `tests/conftest.py` stops the session if it is missing, so no test skips for node.
 - Whether to add a mocked `agent()` harness is decided by an inline spike in slice 1 (U3).
 - Tests stay structural; agent behavior is not tested.
 

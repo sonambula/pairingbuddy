@@ -19,6 +19,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Strict marker syntax: the helper marker takes no arguments, the schemas marker needs at least one name, and any other opening is an error naming the line (exit 2)
   - An unreadable helper template is a per-file error; `--check` covers helper blocks; helper and schemas blocks coexist in one file
   - Tests in `tests/scripts/test_generate_workflow_blocks.py` (including 15 helper-block test cases)
+- `workflows/classify.js`: first production workflow (dynamic workflows migration, TB1.1 Task 3)
+  - Classifies a task via `run('classify-task')` using the generated helper and `task-classification` schema blocks; `meta` documents the args in `whenToUse`
+- Structural test suite `tests/workflows/`, applied automatically to every `workflows/*.js`
+  - Syntax check run as an async-function body (`node --check` on a file with `export` is vacuous on Node 24)
+  - Agent names (`pairingbuddy:<x>` agentTypes and `run('<x>')` literals) resolve to `contracts/agent-config.yaml`
+  - `meta` has `name`, `description`, `whenToUse` and non-empty `phases`; `meta.name` matches the file stem
+  - Generated blocks are in sync (via the generator's `process_path`); spike files `bug-fix-pilot.js` and `spike-probe.js` are tolerated, with a per-file `whenToUse` exemption until TB5.1
+  - Regex structural checks normalize formatting and anchor to their construct, validated by mutation probes
+
+### Changed
+
+- Node.js >= 18 is now a hard requirement for the plugin (hooks) and its tests: `tests/conftest.py` stops the session with a clear message when node is missing or too old, and no test skips for lack of node (supersedes the earlier skip rule)
+- pytest `pythonpath = ["."]` so tests can import the shared `tests.js_syntax` helper; the generator's helper `node --check` test now uses it
 
 ## [0.7.0] - 2026-07-31
 

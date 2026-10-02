@@ -2,6 +2,8 @@
 
 ## Development Setup
 
+Prerequisites: [uv](https://docs.astral.sh/uv/) and Node.js >= 18 (hooks and workflow script checks run on node).
+
 ```bash
 # Clone the repository
 git clone https://github.com/pairingbuddy/pairingbuddy.git
@@ -17,6 +19,8 @@ uv run pytest
 uv run ruff check .
 uv run ruff format .
 ```
+
+The test session exits with a usage error if Node.js is missing or older than 18; tests never skip for node. Every `workflows/*.js` file is covered automatically by `tests/workflows/`.
 
 ## Project Structure
 

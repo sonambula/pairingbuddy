@@ -3,6 +3,18 @@ import os
 import subprocess
 from pathlib import Path
 
+import pytest
+
+from tests.js_syntax import check_node_requirement
+
+
+def pytest_configure(config):
+    """Stop the session early if Node.js >= 18 is missing (hard requirement, no skips)."""
+    problem = check_node_requirement()
+    if problem:
+        pytest.exit(problem, returncode=pytest.ExitCode.USAGE_ERROR)
+
+
 HOOK_PATH = Path(__file__).parent.parent / "hooks" / "solo-progress.mjs"
 
 

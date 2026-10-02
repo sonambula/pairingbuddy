@@ -18,13 +18,14 @@ Tests cover:
 import json
 import os
 import re
-import shutil
 import subprocess
 import sys
 from collections import namedtuple
 from pathlib import Path
 
 import pytest
+
+from tests.js_syntax import node_check_problems
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SCRIPT_PATH = REPO_ROOT / "scripts" / "generate_workflow_blocks.py"
@@ -760,8 +761,6 @@ def test_missing_workflows_dir_fails_clearly(tmp_path, check_mode, make_bad_dir,
 HELPER_OPEN_MARKER = "// <generated:helper> — do not edit; regenerate from contracts/"
 HELPER_CLOSE_MARKER = "// </generated:helper>"
 HELPER_TEMPLATE_PATH = REPO_ROOT / "scripts" / "workflow_helper.js.tmpl"
-NODE = shutil.which("node")
-NODE_CHECK_TIMEOUT_SECONDS = 60
 
 
 def helper_block_source(*schema_names, before="// header\n", between="", after="// footer\n"):
@@ -855,19 +854,13 @@ def test_helper_content_structure(generated_helper_body, fragments):
     assert not missing, f"generated helper should contain {missing}"
 
 
-@pytest.mark.skipif(NODE is None, reason="node is not installed; cannot run node --check")
 def test_helper_output_valid_js(tmp_path):
-    """The generated file passes node --check"""
+    """The generated file passes node --check as an async-function body"""
     workflow = write_and_generate(tmp_path / "helper_valid.js", helper_block_source())
 
-    result = subprocess.run(
-        [NODE, "--check", str(workflow)],
-        capture_output=True,
-        text=True,
-        timeout=NODE_CHECK_TIMEOUT_SECONDS,
-    )
+    problems = node_check_problems(workflow)
 
-    assert result.returncode == 0, f"node --check should accept the file: {result.stderr}"
+    assert problems == [], f"node --check should accept the file: {problems}"
 
 
 def test_helper_deterministic_and_idempotent(tmp_path):
