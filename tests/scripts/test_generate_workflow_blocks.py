@@ -10,11 +10,15 @@ Tests cover:
 - Continue-on-error across several paths (write and --check): good files are still written or
   listed as stale while the failing file is reported
 - Path selection (explicit paths, or every *.js in --workflows-dir when none are given)
+- Helper block (filled from scripts/workflow_helper.js.tmpl): content structure, valid JS,
+  determinism, --check staleness, coexistence with a schemas block (text between the blocks is
+  preserved), and marker-error and marker-strictness rules
 """
 
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 from collections import namedtuple
@@ -60,17 +64,27 @@ def schemas_block_source(*names, before="// header\n", after="// footer\n"):
     return f"{before}{open_marker}\n{SCHEMAS_CLOSE_MARKER}\n{after}"
 
 
-def generate_workflow(path, *schema_names):
-    path.write_text(schemas_block_source(*schema_names))
+def write_and_generate(path, source):
+    """Write `source` to `path`, run the generator in write mode (must exit 0); return `path`."""
+    path.write_text(source)
     result = run_generator(path)
-    assert result.returncode == 0, f"write mode failed: {result.stderr}"
-    return path.read_bytes()
+    assert result.returncode == EXIT_OK, f"write mode failed: {result.stderr}"
+    return path
+
+
+def generate_workflow(path, *schema_names):
+    return write_and_generate(path, schemas_block_source(*schema_names)).read_bytes()
+
+
+def hand_edit_block(path, close_marker):
+    """Simulate a hand edit inside the block that `close_marker` closes."""
+    path.write_text(path.read_text().replace(close_marker, "// hand edit\n" + close_marker))
 
 
 def make_stale_workflow(path):
     generate_workflow(path, "task-classification")
     generated = extract_schemas_block(path.read_text())
-    path.write_text(path.read_text().replace(generated, generated + "// hand edit\n"))
+    hand_edit_block(path, SCHEMAS_CLOSE_MARKER)
     assert extract_schemas_block(path.read_text()) != generated, "hand edit should change block"
     return path
 
@@ -90,10 +104,31 @@ def error_lines(result):
     return [line for line in result.stderr.splitlines() if line.startswith("error:")]
 
 
+def stale_lines(result):
+    return [line for line in result.stderr.splitlines() if line.startswith("stale:")]
+
+
 def assert_no_traceback(result):
     assert "Traceback" not in result.stdout + result.stderr, (
         "should be a clear error, not a Python traceback"
     )
+
+
+def assert_marker_error(result, workflow, expected_line, original_bytes):
+    """The generator reported one clear marker error naming the file and line, exit 2, and left
+    the file untouched (the caller froze its mtime)."""
+    errors = error_lines(result)
+    assert result.returncode == EXIT_ERROR, (
+        f"bad markers should exit with {EXIT_ERROR}, stderr: {result.stderr}"
+    )
+    assert len(errors) == 1, f"expected exactly one error line, got: {errors}"
+    assert "marker" in errors[0].lower(), "error line should mention the markers"
+    assert str(workflow) in errors[0], "error line should identify the file"
+    assert re.search(rf"at line {expected_line}\b", errors[0]), (
+        f"error line should name line {expected_line}, got: {errors[0]}"
+    )
+    assert_no_traceback(result)
+    assert_not_rewritten(workflow, original_bytes)
 
 
 MixedRun = namedtuple("MixedRun", "result good_paths expected_good_bytes expected_stale_lines")
@@ -121,8 +156,7 @@ def run_with_bad_target(tmp_path, bad, check_mode):
 
 
 def assert_good_files_outcome(mixed, check_mode, context):
-    stale_lines = [line for line in mixed.result.stderr.splitlines() if line.startswith("stale:")]
-    assert stale_lines == mixed.expected_stale_lines, (
+    assert stale_lines(mixed.result) == mixed.expected_stale_lines, (
         "stale lines should list every readable stale file in --check and none in write mode"
     )
     for path in mixed.good_paths:
@@ -533,18 +567,7 @@ def test_misordered_markers_fail_clearly(tmp_path, source, expected_line, check_
 
     result = run_generator(*args)
 
-    errors = error_lines(result)
-    assert result.returncode == EXIT_ERROR, (
-        f"misordered markers should exit with {EXIT_ERROR}, stderr: {result.stderr}"
-    )
-    assert len(errors) == 1, f"expected exactly one error line, got: {errors}"
-    assert "marker" in errors[0].lower(), "error line should mention the markers"
-    assert str(workflow) in errors[0], "error line should identify the file"
-    assert re.search(rf"at line {expected_line}\b", errors[0]), (
-        f"error line should name line {expected_line}, got: {errors[0]}"
-    )
-    assert_no_traceback(result)
-    assert_not_rewritten(workflow, original_bytes)
+    assert_marker_error(result, workflow, expected_line, original_bytes)
 
 
 def make_missing_target(path):
@@ -663,11 +686,10 @@ def test_no_paths_processes_workflows_dir(tmp_path, check_mode):
 
     result = run_generator(*args, "--workflows-dir", workflows_dir)
 
-    stale_lines = [line for line in result.stderr.splitlines() if line.startswith("stale:")]
     assert result.returncode == expected_exit, (
         f"expected exit {expected_exit}, stderr: {result.stderr}"
     )
-    assert stale_lines == expected_stale_lines, (
+    assert stale_lines(result) == expected_stale_lines, (
         "stale lines should list exactly the .js files in --check and none in write mode"
     )
     for path in js_paths:
@@ -726,3 +748,379 @@ def test_missing_workflows_dir_fails_clearly(tmp_path, check_mode, make_bad_dir,
     )
     assert_no_traceback(result)
     assert_bad_untouched()
+
+
+# ============================================================================
+# Helper Block Tests
+# ============================================================================
+# These tests cover generator behavior for the helper block kind, including
+# generation, check mode, coexistence with schemas blocks, and marker rules.
+
+
+HELPER_OPEN_MARKER = "// <generated:helper> — do not edit; regenerate from contracts/"
+HELPER_CLOSE_MARKER = "// </generated:helper>"
+HELPER_TEMPLATE_PATH = REPO_ROOT / "scripts" / "workflow_helper.js.tmpl"
+NODE = shutil.which("node")
+NODE_CHECK_TIMEOUT_SECONDS = 60
+
+
+def helper_block_source(*schema_names, before="// header\n", between="", after="// footer\n"):
+    """Source with a helper block; with schema names, a schemas block comes first and `between`
+    is the text separating the two blocks."""
+    helper_markers = f"{HELPER_OPEN_MARKER}\n{HELPER_CLOSE_MARKER}\n"
+    if schema_names:
+        return schemas_block_source(
+            *schema_names, before=before, after=f"{between}{helper_markers}{after}"
+        )
+    return f"{before}{helper_markers}{after}"
+
+
+def extract_helper_body(content):
+    """Text strictly between the helper markers."""
+    match = re.search(
+        rf"^{re.escape(HELPER_OPEN_MARKER)}\n(.*?)^{re.escape(HELPER_CLOSE_MARKER)}$",
+        content,
+        re.DOTALL | re.MULTILINE,
+    )
+    assert match is not None, "helper markers should be present"
+    return match.group(1)
+
+
+def test_helper_fills_block(tmp_path):
+    """Empty helper block gets filled from the helper template; generator exits 0."""
+    workflow = tmp_path / "helper_fill.js"
+    workflow.write_text(helper_block_source())
+
+    result = run_generator(workflow)
+
+    assert result.returncode == EXIT_OK, f"generator failed: {result.stderr}"
+    template = HELPER_TEMPLATE_PATH.read_text()
+    assert workflow.read_text() == (
+        f"// header\n{HELPER_OPEN_MARKER}\n{template}{HELPER_CLOSE_MARKER}\n// footer\n"
+    ), "helper block should hold the template exactly, with the surrounding text preserved"
+
+
+# check id -> fragments the generated helper must contain
+HELPER_CONTENT_CHECKS = {
+    "args-normalization": [
+        "const ARGS = typeof args === 'string'",
+        "JSON.parse(args)",
+    ],
+    "require-args": [
+        "const requireArgs = (name, keys) =>",
+        "throw new Error(`${name} requires args: {${missing.join(', ')}}`)",
+        "keys.filter(",
+    ],
+    "project-root": [
+        "const projectRoot = ARGS && ARGS.project_root",
+    ],
+    "workflow-mode-preamble": [
+        "const WORKFLOW_MODE = `WORKFLOW MODE",
+        "The target project root is ${projectRoot}",
+        "Your inputs are given inline below",
+        "Do NOT read or write anything under .pairingbuddy/",
+        "Return your output through StructuredOutput",
+        "skip any Human Review step",
+        "create and edit project source/test files",
+    ],
+    "block": [
+        "const block = (name, value) =>",
+        "JSON.stringify(value, null, 2)",
+    ],
+    "run": [
+        "const run = (agentName, phaseTitle, inputs, schema, label) =>",
+        "agent([WORKFLOW_MODE, ...inputs].join('\\n\\n'), {",
+        "agentType: `pairingbuddy:${agentName}`",
+        "schema,",
+        "phase: phaseTitle",
+        "label: label || agentName",
+    ],
+}
+
+
+@pytest.fixture(scope="module")
+def generated_helper_body(tmp_path_factory):
+    workflow = tmp_path_factory.mktemp("helper_struct") / "helper_struct.js"
+    write_and_generate(workflow, helper_block_source())
+    return extract_helper_body(workflow.read_text())
+
+
+@pytest.mark.parametrize("fragments", HELPER_CONTENT_CHECKS.values(), ids=HELPER_CONTENT_CHECKS)
+def test_helper_content_structure(generated_helper_body, fragments):
+    """The generated helper contains each required piece (args, requireArgs, projectRoot,
+    WORKFLOW_MODE, block, run)"""
+    body = generated_helper_body
+
+    missing = [fragment for fragment in fragments if fragment not in body]
+    assert not missing, f"generated helper should contain {missing}"
+
+
+@pytest.mark.skipif(NODE is None, reason="node is not installed; cannot run node --check")
+def test_helper_output_valid_js(tmp_path):
+    """The generated file passes node --check"""
+    workflow = write_and_generate(tmp_path / "helper_valid.js", helper_block_source())
+
+    result = subprocess.run(
+        [NODE, "--check", str(workflow)],
+        capture_output=True,
+        text=True,
+        timeout=NODE_CHECK_TIMEOUT_SECONDS,
+    )
+
+    assert result.returncode == 0, f"node --check should accept the file: {result.stderr}"
+
+
+def test_helper_deterministic_and_idempotent(tmp_path):
+    """Two runs give byte-identical output and the second run rewrites nothing"""
+    first = write_and_generate(tmp_path / "first.js", helper_block_source())
+    second = write_and_generate(tmp_path / "second.js", helper_block_source())
+    assert first.read_bytes() == second.read_bytes(), "separate runs should be byte-identical"
+    freeze_mtime(first)
+    first_bytes = first.read_bytes()
+
+    rerun = run_generator(first)
+
+    assert rerun.returncode == EXIT_OK, f"second run failed: {rerun.stderr}"
+    assert_not_rewritten(first, first_bytes)
+
+
+def test_agent_type_only_in_helper(tmp_path):
+    """Every occurrence of agentType lies inside the helper block, none outside the markers"""
+    workflow = write_and_generate(
+        tmp_path / "agent_type_iso.js",
+        helper_block_source(
+            "task-classification",
+            before="// header\nconst before = 1;\n",
+            after="// footer\nconst after = 2;\n",
+        ),
+    )
+    content = workflow.read_text()
+    inside = extract_helper_body(content)
+    outside = content.replace(inside, "")
+
+    assert "agentType" in inside, "the helper should set agentType"
+    assert "agentType" not in outside, "nothing outside the helper block should mention agentType"
+
+
+def test_check_passes_fresh_helper(tmp_path):
+    """--check exits 0 on a freshly generated helper block"""
+    workflow = write_and_generate(tmp_path / "check_fresh_helper.js", helper_block_source())
+    original_bytes = workflow.read_bytes()
+    freeze_mtime(workflow)
+
+    result = run_generator("--check", workflow)
+
+    assert result.returncode == EXIT_OK, f"--check should pass: {result.stderr}"
+    assert not stale_lines(result), "a fresh helper should not be reported as stale"
+    assert_not_rewritten(workflow, original_bytes)
+
+
+def test_check_fails_on_hand_edit_in_helper(tmp_path):
+    """A hand edit inside the helper makes --check exit 1 with a stale: line naming the file"""
+    workflow = write_and_generate(tmp_path / "check_edit_helper.js", helper_block_source())
+    hand_edit_block(workflow, HELPER_CLOSE_MARKER)
+    original_bytes = workflow.read_bytes()
+    freeze_mtime(workflow)
+
+    result = run_generator("--check", workflow)
+
+    assert result.returncode == EXIT_STALE, f"--check should exit {EXIT_STALE}: {result.stderr}"
+    assert stale_lines(result) == [f"stale: {workflow}"], "stale line should name the file"
+    assert_not_rewritten(workflow, original_bytes)
+
+
+def test_check_fails_on_empty_helper(tmp_path):
+    """An empty helper block is reported as stale, not accepted as fresh"""
+    workflow = tmp_path / "check_empty_helper.js"
+    workflow.write_text(helper_block_source())
+    original_bytes = workflow.read_bytes()
+    freeze_mtime(workflow)
+
+    result = run_generator("--check", workflow)
+
+    assert result.returncode == EXIT_STALE, f"--check should exit {EXIT_STALE}: {result.stderr}"
+    assert stale_lines(result) == [f"stale: {workflow}"], "stale line should name the file"
+    assert_not_rewritten(workflow, original_bytes)
+
+
+def test_check_ignores_edit_outside_helper(tmp_path):
+    """An edit outside the markers does not make --check fail"""
+    workflow = write_and_generate(tmp_path / "check_outside_helper.js", helper_block_source())
+    workflow.write_text(workflow.read_text().replace("// footer\n", "// footer\n// hand edit\n"))
+    original_bytes = workflow.read_bytes()
+    freeze_mtime(workflow)
+
+    result = run_generator("--check", workflow)
+
+    assert result.returncode == EXIT_OK, f"edit outside markers should pass: {result.stderr}"
+    assert not stale_lines(result), "an edit outside the markers should not be reported as stale"
+    assert_not_rewritten(workflow, original_bytes)
+
+
+def test_both_blocks_regenerated(tmp_path):
+    """One file with a schemas block and a helper block gets both filled in a single run"""
+    workflow = tmp_path / "both_blocks.js"
+    workflow.write_text(helper_block_source("task-classification"))
+
+    result = run_generator(workflow)
+
+    content = workflow.read_text()
+    assert result.returncode == EXIT_OK, f"generator failed: {result.stderr}"
+    assert parse_constants(extract_schemas_block(content)) == {
+        "TASK_CLASSIFICATION": load_contract_schema("task-classification")
+    }, "schemas block should hold the declared schema"
+    assert extract_helper_body(content) == HELPER_TEMPLATE_PATH.read_text(), (
+        "helper block should hold the template"
+    )
+
+
+STALE_BLOCK_CLOSE_MARKERS = {"schemas": SCHEMAS_CLOSE_MARKER, "helper": HELPER_CLOSE_MARKER}
+
+
+@pytest.mark.parametrize("stale_block", STALE_BLOCK_CLOSE_MARKERS)
+def test_stale_one_block_regenerates_only_that_one(tmp_path, stale_block):
+    """When only one of the two blocks is stale, --check flags the file and a normal run restores
+    the exact fresh content"""
+    workflow = write_and_generate(
+        tmp_path / "stale_one.js", helper_block_source("task-classification")
+    )
+    fresh = workflow.read_text()
+    hand_edit_block(workflow, STALE_BLOCK_CLOSE_MARKERS[stale_block])
+    stale_bytes = workflow.read_bytes()
+    freeze_mtime(workflow)
+
+    check_result = run_generator("--check", workflow)
+
+    assert check_result.returncode == EXIT_STALE, (
+        f"--check should flag the file: {check_result.stderr}"
+    )
+    assert stale_lines(check_result) == [f"stale: {workflow}"], "stale line should name the file"
+    assert_not_rewritten(workflow, stale_bytes)
+
+    result = run_generator(workflow)
+
+    content = workflow.read_text()
+    assert result.returncode == EXIT_OK, f"normal run failed: {result.stderr}"
+    assert content == fresh, "the stale block should be regenerated to the fresh content"
+
+
+def test_bytes_outside_markers_preserved_with_both_blocks(tmp_path):
+    """Text outside both blocks, including between them, is preserved byte for byte"""
+    before = "// header — café  \n"
+    between = "// between — über  \nconst mid = 3;\t \n"
+    after = "// footer — naïve  \nexport {};"
+    workflow = tmp_path / "preserve_both.js"
+    workflow.write_text(
+        helper_block_source("task-classification", before=before, between=between, after=after)
+    )
+
+    result = run_generator(workflow)
+
+    content = workflow.read_bytes()
+    assert result.returncode == EXIT_OK, f"generator failed: {result.stderr}"
+    assert content.startswith(before.encode()), "text before the blocks should be preserved"
+    assert f"{SCHEMAS_CLOSE_MARKER}\n{between}{HELPER_OPEN_MARKER}\n".encode() in content, (
+        "text between the blocks should be preserved byte for byte"
+    )
+    assert content.endswith(HELPER_CLOSE_MARKER.encode() + b"\n" + after.encode()), (
+        "text after the blocks should be preserved byte for byte"
+    )
+
+
+def with_helper_markers(source):
+    """A schemas marker-error source, rewritten to use helper markers."""
+    return source.replace(TASK_CLASSIFICATION_OPEN_MARKER, HELPER_OPEN_MARKER).replace(
+        SCHEMAS_CLOSE_MARKER, HELPER_CLOSE_MARKER
+    )
+
+
+# id -> (source, line the generator should report)
+HELPER_MARKER_ERROR_SOURCES = {
+    **{
+        f"helper-{case_id}": (with_helper_markers(source), line)
+        for case_id, (source, line) in MISORDERED_MARKER_SOURCES.items()
+    },
+    "unclosed": (f"// header\n{HELPER_OPEN_MARKER}\nconst x = 1;\n// footer\n", 2),
+    "helper-open-inside-schemas": (
+        f"// header\n{TASK_CLASSIFICATION_OPEN_MARKER}\n"
+        f"{HELPER_OPEN_MARKER}\n{HELPER_CLOSE_MARKER}\n{SCHEMAS_CLOSE_MARKER}\n",
+        3,
+    ),
+    "schemas-open-closed-by-helper": (
+        f"// header\n{TASK_CLASSIFICATION_OPEN_MARKER}\n{HELPER_CLOSE_MARKER}\n",
+        3,
+    ),
+    "helper-open-closed-by-schemas": (
+        f"// header\n{HELPER_OPEN_MARKER}\n{SCHEMAS_CLOSE_MARKER}\n",
+        3,
+    ),
+    "schemas-open-then-helper-open": (
+        f"// header\n{TASK_CLASSIFICATION_OPEN_MARKER}\n"
+        f"{HELPER_OPEN_MARKER}\n{HELPER_CLOSE_MARKER}\n",
+        3,
+    ),
+}
+
+
+@pytest.mark.parametrize("check_mode", [False, True], ids=["write", "check"])
+@pytest.mark.parametrize(
+    "source, expected_line", HELPER_MARKER_ERROR_SOURCES.values(), ids=HELPER_MARKER_ERROR_SOURCES
+)
+def test_helper_marker_errors_exit_2(tmp_path, source, expected_line, check_mode):
+    """Unclosed, nested and misordered helper markers (including ones misplaced relative to a
+    schemas marker) are errors naming the line, exit 2, and leave the file unchanged"""
+    workflow = tmp_path / "helper_marker_error.js"
+    workflow.write_text(source)
+    original_bytes = workflow.read_bytes()
+    freeze_mtime(workflow)
+    args = ["--check", workflow] if check_mode else [workflow]
+
+    result = run_generator(*args)
+
+    assert_marker_error(result, workflow, expected_line, original_bytes)
+
+
+# id -> (malformed opening marker, matching closing marker)
+MALFORMED_OPENING_MARKERS = {
+    "helper-suffix-glued-on": ("// <generated:helperX>", HELPER_CLOSE_MARKER),
+    "helper-with-argument": ("// <generated:helper extra-arg>", HELPER_CLOSE_MARKER),
+    "schemas-suffix-glued-on": ("// <generated:schemasfoo>", SCHEMAS_CLOSE_MARKER),
+    "schemas-without-names": ("// <generated:schemas>", SCHEMAS_CLOSE_MARKER),
+}
+
+
+@pytest.mark.parametrize("check_mode", [False, True], ids=["write", "check"])
+@pytest.mark.parametrize(
+    "open_marker, close_marker", MALFORMED_OPENING_MARKERS.values(), ids=MALFORMED_OPENING_MARKERS
+)
+def test_malformed_opening_marker_exit_2(tmp_path, open_marker, close_marker, check_mode):
+    """Marker syntax is strict: the helper marker takes no arguments and the schemas marker needs
+    at least one name, so a malformed opening marker is an error naming the line, exit 2, and
+    leaves the file unchanged"""
+    workflow = tmp_path / "malformed_marker.js"
+    workflow.write_text(f"// header\n{open_marker}\n{close_marker}\n// footer\n")
+    original_bytes = workflow.read_bytes()
+    freeze_mtime(workflow)
+    args = ["--check", workflow] if check_mode else [workflow]
+
+    result = run_generator(*args)
+
+    assert_marker_error(result, workflow, 2, original_bytes)
+
+
+def test_helper_marker_text_exact(tmp_path):
+    """The generator accepts the exact markers '// <generated:helper> — do not edit; regenerate
+    from contracts/' and '// </generated:helper>'"""
+    # Literal strings on purpose: they pin the spec independently of the HELPER_*_MARKER constants.
+    open_marker = "// <generated:helper> — do not edit; regenerate from contracts/"
+    close_marker = "// </generated:helper>"
+    workflow = tmp_path / "helper_marker_exact.js"
+    workflow.write_text(f"// header\n{open_marker}\n{close_marker}\n// footer\n")
+
+    result = run_generator(workflow)
+
+    assert result.returncode == EXIT_OK, f"generator failed: {result.stderr}"
+    template = HELPER_TEMPLATE_PATH.read_text()
+    assert (
+        workflow.read_text() == f"// header\n{open_marker}\n{template}{close_marker}\n// footer\n"
+    ), "the exact markers should be kept around the generated helper"

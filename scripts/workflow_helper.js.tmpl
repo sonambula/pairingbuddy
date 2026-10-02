@@ -1,0 +1,28 @@
+// ---- args -------------------------------------------------------------------
+// args may arrive as a raw JSON string depending on the invoking runtime.
+const ARGS = typeof args === 'string' ? (() => { try { return JSON.parse(args) } catch (e) { return args } })() : args
+
+const requireArgs = (name, keys) => {
+  const missing = keys.filter((key) => !(ARGS && ARGS[key]))
+  if (missing.length) throw new Error(`${name} requires args: {${missing.join(', ')}}`)
+}
+
+const projectRoot = ARGS && ARGS.project_root
+
+// ---- prompt plumbing --------------------------------------------------------
+const WORKFLOW_MODE = `WORKFLOW MODE (overrides your Input/Output file instructions):
+- The target project root is ${projectRoot}. Run every command from there; all paths are relative to it.
+- Your inputs are given inline below instead of in .pairingbuddy/*.json. Do NOT read or write anything under .pairingbuddy/.
+- Return your output through StructuredOutput (same shape as your documented output file) instead of writing the JSON file.
+- No human is reachable: skip any Human Review step, exactly as in Solo mode.
+- You may still create and edit project source/test files as your instructions allow.`
+
+const block = (name, value) => `${name}:\n\`\`\`json\n${JSON.stringify(value, null, 2)}\n\`\`\``
+
+const run = (agentName, phaseTitle, inputs, schema, label) =>
+  agent([WORKFLOW_MODE, ...inputs].join('\n\n'), {
+    agentType: `pairingbuddy:${agentName}`,
+    schema,
+    phase: phaseTitle,
+    label: label || agentName,
+  })

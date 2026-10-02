@@ -14,15 +14,19 @@ Schemas block: the opening marker line declares schema names
 <schemas-dir>/<name>.schema.json (default: contracts/schemas) and emitted as `const A_B = <json>;`.
 The JSON-Schema meta keywords `$schema` and `$id` are stripped.
 
+Helper block: an opening marker line `// <generated:helper>` (no names) is filled verbatim from
+scripts/workflow_helper.js.tmpl.
+
 With --check nothing is written: each out-of-date file is reported as `stale: <path>` on
 stderr and the exit code is 1 (0 when every block is up to date).
 
-A schema error (an unknown schema name, an unreadable or invalid schema file, or misordered,
-nested or unclosed schemas markers), an unreadable target (`error: cannot read <path>: <reason>`)
+A generation error (an unknown schema name, an unreadable or invalid schema file, an unreadable
+helper template, or malformed, misordered, nested or unclosed generated markers), an
+unreadable target (`error: cannot read <path>: <reason>`)
 or an unwritable target (`error: cannot write <path>: <reason>`)
 prints `error: ...` to stderr for that file only: the remaining paths are still processed
 (good files are written, stale files still reported).
-The exit code is 2 if any file had an error (schema error, unreadable or unwritable target),
+The exit code is 2 if any file had an error (generation error, unreadable or unwritable target),
 else 1 if any is stale (--check), else 0.
 """
 
@@ -39,13 +43,26 @@ EXIT_OK = 0
 EXIT_STALE = 1
 EXIT_ERROR = 2
 META_KEYWORDS = ("$schema", "$id")
-OPEN_MARKER = r"// <generated:schemas (?P<names>[^>]*)>"
-CLOSE_MARKER = r"// </generated:schemas>"
+HELPER_TEMPLATE = Path(__file__).resolve().parent / "workflow_helper.js.tmpl"
+KINDS = "schemas|helper"
+
+
+def opening_marker(kind_pattern: str) -> str:
+    return rf"// <generated:{kind_pattern}(?P<rest>[^>\n]*)>"
+
+
+def closing_marker(kind_pattern: str) -> str:
+    return rf"// </generated:{kind_pattern}>"
+
+
+OPEN_MARKER = opening_marker(rf"(?P<kind>{KINDS})")
+CLOSE_MARKER = closing_marker(rf"(?P<close_kind>{KINDS})")
 BLOCK = re.compile(
-    rf"(?P<open>{OPEN_MARKER}[^\n]*\n)(?:.*?)(?P<close>{CLOSE_MARKER})",
+    rf"(?P<open>{OPEN_MARKER}[^\n]*\n)(?:.*?)(?P<close>{closing_marker('(?P=kind)')})",
     re.DOTALL,
 )
-MARKER = re.compile(rf"(?P<open>{OPEN_MARKER}[^\n]*(?:\n|\Z))|(?P<close>{CLOSE_MARKER})")
+SCAN_OPEN_MARKER = opening_marker(r"(?P<kind>[^\s>]*)")
+MARKER = re.compile(rf"(?P<open>{SCAN_OPEN_MARKER}[^\n]*(?:\n|\Z))|(?P<close>{CLOSE_MARKER})")
 
 
 class GenerationError(Exception):
@@ -81,9 +98,20 @@ class SchemaError(GenerationError):
     """A problem with a file's schemas block."""
 
 
-class MarkerError(SchemaError):
+class HelperTemplateError(GenerationError):
+    """The helper template file could not be read."""
+
+    location = "declared in"
+
+    def __init__(self, template_path: Path, reason: str):
+        super().__init__(f"unreadable helper template ({template_path}): {reason}")
+
+
+class MarkerError(GenerationError):
+    """The generated markers of a file are malformed, misordered, nested or unclosed."""
+
     def __init__(self, problem: str, line: int):
-        super().__init__(f"invalid schemas markers ({problem} at line {line})")
+        super().__init__(f"invalid generated markers ({problem} at line {line})")
 
 
 class UnknownSchemaError(SchemaError):
@@ -139,27 +167,55 @@ def render_constant(name: str, schemas_dir: Path) -> str:
     return f"const {constant_name(name)} = {json.dumps(schema, indent=2)};\n"
 
 
+def is_well_formed_opening(kind: str, rest: str) -> bool:
+    if kind == "helper":
+        return rest == ""
+    return kind == "schemas" and rest.strip() != ""
+
+
 def check_markers_ordered(text: str) -> None:
     pending_line = None
+    pending_kind = None
     for marker in MARKER.finditer(text):
         line = text.count("\n", 0, marker.start()) + 1
         if marker["close"]:
             if pending_line is None:
                 raise MarkerError("closing marker without an opening one", line)
+            if marker["close_kind"] != pending_kind:
+                raise MarkerError(
+                    f"closing {marker['close_kind']} marker for the {pending_kind} block "
+                    f"opened at line {pending_line}",
+                    line,
+                )
             pending_line = None
+        elif not is_well_formed_opening(marker["kind"], marker["rest"]):
+            raise MarkerError("malformed opening marker", line)
         elif pending_line is not None:
             raise MarkerError(
                 f"opening marker while the one at line {pending_line} is still open", line
             )
         else:
             pending_line = line
+            pending_kind = marker["kind"]
     if pending_line is not None:
         raise MarkerError("opening marker never closed", pending_line)
 
 
+def render_helper() -> str:
+    try:
+        return HELPER_TEMPLATE.read_text(encoding="utf-8")
+    except OSError as error:
+        raise HelperTemplateError(HELPER_TEMPLATE, os_reason(error)) from error
+
+
 def render_block(match: re.Match, schemas_dir: Path) -> str:
-    names = match["names"].split()
-    body = "".join(render_constant(name, schemas_dir) for name in names)
+    kind = match["kind"]
+    if kind == "helper":
+        body = render_helper()
+    elif kind == "schemas":
+        body = "".join(render_constant(name, schemas_dir) for name in match["rest"].split())
+    else:
+        raise ValueError(f"unhandled generated block kind: {kind}")
     return match["open"] + body + match["close"]
 
 
@@ -201,8 +257,8 @@ def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(
         description=__doc__.splitlines()[0],
         epilog=(
-            "An error (schema problem, unreadable or unwritable target, missing workflows "
-            "directory) prints `error: ...` "
+            "An error (schema problem, unreadable helper template, malformed markers, unreadable "
+            "or unwritable target, missing workflows directory) prints `error: ...` "
             "on stderr; "
             "other paths are still processed. "
             "Exit 2 on any error, else 1 if any file is stale (--check), else 0."

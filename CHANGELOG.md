@@ -9,13 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- Workflow block generator `scripts/generate_workflow_blocks.py` (dynamic workflows migration, TB1.1 Task 1)
+- Workflow block generator `scripts/generate_workflow_blocks.py` (dynamic workflows migration, TB1.1 Tasks 1-2)
   - Run with `uv run python scripts/generate_workflow_blocks.py [--schemas-dir DIR] [--workflows-dir DIR] [--check] [paths...]`; with no paths it processes every `*.js` in the workflows dir (default `workflows/`)
   - Fills `<generated:schemas name...>` marker blocks with `const UPPER_SNAKE = <json>` loaded from `contracts/schemas/<name>.schema.json`; strips `$schema` and `$id`, preserves the source file's key order (not sorted), 2-space indent
   - Only the text between markers is rewritten (byte-preserving outside; unchanged files are not rewritten)
   - `--check` writes nothing and reports `stale: <path>`
   - Per-file errors (unknown, invalid or unreadable schema; misordered, nested or unclosed markers; unreadable or unwritable target; missing workflows dir) are reported and the run continues; exit 2 on any error, else 1 if stale in `--check`, else 0
-  - Tests in `tests/scripts/test_generate_workflow_blocks.py`
+  - Fills `<generated:helper>` blocks verbatim from `scripts/workflow_helper.js.tmpl` (args normalization, `requireArgs`, `projectRoot`, WORKFLOW MODE preamble, `block()`, `run()`); `agentType` appears only in `run()`, so in one generated place
+  - Strict marker syntax: the helper marker takes no arguments, the schemas marker needs at least one name, and any other opening is an error naming the line (exit 2)
+  - An unreadable helper template is a per-file error; `--check` covers helper blocks; helper and schemas blocks coexist in one file
+  - Tests in `tests/scripts/test_generate_workflow_blocks.py` (including 15 helper-block test cases)
 
 ## [0.7.0] - 2026-07-31
 
