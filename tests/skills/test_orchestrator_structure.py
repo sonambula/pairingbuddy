@@ -82,8 +82,8 @@ def test_sections_requiring_python_code_block():
 
             # Find the section and check for python code block
             # Pattern: ## <heading> followed by ```python before next ## heading
-            pattern = rf"## {re.escape(heading)}\s*(.*?)(?=\n## |\Z)"
-            match = re.search(pattern, content, re.DOTALL)
+            pattern = rf"^## {re.escape(heading)}[ \t]*$\s*(.*?)(?=\n## |\Z)"
+            match = re.search(pattern, content, re.DOTALL | re.MULTILINE)
 
             assert match, f"Could not find section: ## {heading}"
 
@@ -96,8 +96,8 @@ def test_sections_requiring_python_code_block():
 def extract_python_code_block(content: str, section_heading: str) -> str | None:
     """Extract Python code block from a section."""
     # Find the section
-    pattern = rf"## {re.escape(section_heading)}\s*(.*?)(?=\n## |\Z)"
-    match = re.search(pattern, content, re.DOTALL)
+    pattern = rf"^## {re.escape(section_heading)}[ \t]*$\s*(.*?)(?=\n## |\Z)"
+    match = re.search(pattern, content, re.DOTALL | re.MULTILINE)
     if not match:
         return None
 

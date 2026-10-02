@@ -32,6 +32,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Node.js >= 18 is now a hard requirement for the plugin (hooks) and its tests: `tests/conftest.py` stops the session with a clear message when node is missing or too old, and no test skips for lack of node (supersedes the earlier skip rule)
 - pytest `pythonpath = ["."]` so tests can import the shared `tests.js_syntax` helper; the generator's helper `node --check` test now uses it
+- Task classification runs as a workflow (`pairingbuddy:classify`) instead of the `classify-task` agent, in both the plan-execution and normal paths of the coding skill
+  - The result is held in context and `task-classification.json` is no longer written; `project_root` is absolute and `human_guidance` is passed only when `.pairingbuddy/human-guidance.json` exists
+  - Temporary bridge (removed in TB3.3): `UNMIGRATED_FLOWS` lists all five task types, and `task.json` is still written after classification while `task_type` is in it
+  - `/pairingbuddy:code` states that it authorizes the Workflow tool for the workflows named in the coding skill
+  - `tests/agents/test_workflow_logic.py` gains `find_unresolved_calls`, which accepts `Workflow('pairingbuddy:<name>')` only when `workflows/<name>.js` exists
+  - `classify-task` can no longer ask the human to clarify the task, because it runs in workflow mode
 
 ## [0.7.0] - 2026-07-31
 

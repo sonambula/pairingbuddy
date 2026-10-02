@@ -5,7 +5,7 @@ description: Orchestrates TDD workflow by invoking specialized agents. Manages s
 
 # Coding Orchestrator
 
-Orchestrates the TDD workflow by invoking specialized agents via the Task tool. Each agent reads input JSON, performs one operation, writes output JSON.
+Orchestrates the TDD workflow by invoking specialized agents via the Task tool and workflows via the Workflow tool. Each agent reads input JSON, performs one operation, writes output JSON.
 
 ## CRITICAL: Follow the Workflow Exactly
 
@@ -20,7 +20,6 @@ State files live in `.pairingbuddy/` at the git root of the target project.
 | Variable | File | Schema |
 |----------|------|--------|
 | task | .pairingbuddy/task.json | task.schema.json |
-| task_classification | .pairingbuddy/task-classification.json | task-classification.schema.json |
 | test_config | .pairingbuddy/test-config.json | test-config.schema.json |
 | human_guidance | .pairingbuddy/human-guidance.json | human-guidance.schema.json |
 | scenarios | .pairingbuddy/scenarios.json | scenarios.schema.json |
@@ -48,14 +47,14 @@ The Workflow section below contains Python pseudocode - a specification, not exe
 
 ### Reading the Pseudocode
 
-- **Function calls** map to agent invocations
+- **Function calls** map to agent invocations (Task tool), except `Workflow('pairingbuddy:<name>', args=X)` calls, which map to Workflow tool calls (see Invoking Workflows)
 - **Variable names** map to JSON file paths (see State File Mappings)
 - **Underscores** in function names become **hyphens** in agent names
   - `enumerate_scenarios_and_test_cases()` → agent `enumerate-scenarios-and-test-cases`
 
 ### Agent Invocation
 
-Each function call translates to a Task tool invocation:
+Each agent function call (not a `Workflow(...)` call) translates to a Task tool invocation:
 
 ```
 Task tool:
@@ -63,6 +62,20 @@ Task tool:
 ```
 
 Agents are self-contained - they know what to read (Input section), what to do (Instructions), and what to write (Output section). No prompt needed.
+
+### Invoking Workflows
+
+`Workflow('pairingbuddy:<name>', args=X)` is a call to the Workflow tool, not a Task-tool agent:
+
+```
+Workflow tool:
+  name: "pairingbuddy:<name>"
+  args: X
+```
+
+- If the tool reports the name as unknown, retry with `scriptPath` pointing at the plugin's `workflows/<name>.js`: `${CLAUDE_PLUGIN_ROOT}/workflows/<name>.js`, or, if that variable is not substituted, relative to this skill's base directory. Never fall back to the Task tool.
+- Wait for the result and bind it to the assigned variable (e.g. `classification`).
+- Variables not listed in State File Mappings are in-context values, not files. `task` is the in-context task object; `task.json` is written only by the TEMPORARY BRIDGE in the Workflow section.
 
 ### Control Flow
 
@@ -78,7 +91,7 @@ Functions prefixed with `_` are **orchestrator logic**, not agent calls. The orc
 
 | Function | Behavior |
 |----------|----------|
-| `_cleanup_state_files()` | **MANDATORY.** Delete ALL `.pairingbuddy/*.json` files EXCEPT: `test-config.json`, `doc-config.json`, `human-guidance.json`. These three files persist across tasks. All other state files (task.json, task-classification.json, scenarios.json, tests.json, spike-*.json, etc.) MUST be deleted to start fresh. This prevents stale state from previous tasks from affecting the current task. |
+| `_cleanup_state_files()` | **MANDATORY.** Delete ALL `.pairingbuddy/*.json` files EXCEPT: `test-config.json`, `doc-config.json`, `human-guidance.json`. These three files persist across tasks. All other state files (task.json, scenarios.json, tests.json, spike-*.json, etc.) MUST be deleted to start fresh. This prevents stale state from previous tasks from affecting the current task. |
 | `_filter_pending(tests)` | Filter tests.json to return only tests not yet processed in this session |
 | `_filter_pending(spike_questions)` | Filter spike-questions.json units to return only units with status "pending" |
 | `_mark_unit_answered(spike_questions, unit_id)` | Update unit status to "answered" in spike-questions.json |
@@ -91,6 +104,10 @@ Functions prefixed with `_` are **orchestrator logic**, not agent calls. The orc
 | `_hydrate_claude_tasks(plan_tasks)` | Create Claude Code Tasks (TaskCreate) for all plan tasks, marking completed ones. Provides in-session visibility. |
 | `_update_claude_task(task_id)` | Mark a Claude Code Task as completed (TaskUpdate) |
 | `_update_solo_report(event, details)` | **Solo mode only.** Create or append to `.pairingbuddy/SOLO_BUDDY_REPORT.md`. Called with event `"start"` (creates file if absent; on resume, **reconciles** existing entries against the current plan — drops entries for removed tasks, reorders to match plan, then appends session separator), `"task_complete"` (appends task entry), or `"stopped"` (appends stop entry, updates header). See Solo Mode section for report template. No-op in interactive mode. |
+| `_absolute_project_root()` | Return the absolute git root of the target project, i.e. the directory that holds `.pairingbuddy/` (e.g. `git rev-parse --show-toplevel`). Never a relative path. |
+| `_file_exists(path)` | Return true if the file exists (paths relative to the project root) |
+| `_read_json(path)` | Read and parse the JSON file, return its contents |
+| `_write_json(path, data)` | Serialize `data` as JSON and write it to the file |
 
 These functions handle coordination, human interaction, and control flow that doesn't belong in agents.
 
@@ -99,6 +116,9 @@ These functions handle coordination, human interaction, and control flow that do
 **Prerequisites:** Before starting, ensure `.pairingbuddy/test-config.json` exists. See "Bootstrap test-config.json" in Orchestrator Behavior.
 
 ```python
+# TEMPORARY BRIDGE — removed in TB3.3
+UNMIGRATED_FLOWS = ["new_feature", "bug_fix", "refactoring", "config_change", "spike"]
+
 # Plan execution mode: iterate through tasks from a plan MD file
 if _detect_plan_file(task):
     plan_path = task.plan_file
@@ -110,13 +130,19 @@ if _detect_plan_file(task):
         if plan_task.checked:
             continue
 
-        # Write task.json with the rich task description from the plan
+        # The rich task description from the plan
         task = {"description": plan_task.description, "context": plan_task.context}
 
         # Run normal TDD workflow for this task (falls through to code below)
         human_guidance = curate_guidance(human_guidance, task)
         _cleanup_state_files()
-        task_classification = classify_task(task)
+        classify_args = {"project_root": _absolute_project_root(), "task": task}
+        if _file_exists(".pairingbuddy/human-guidance.json"):
+            classify_args["human_guidance"] = _read_json(".pairingbuddy/human-guidance.json")
+        classification = Workflow('pairingbuddy:classify', args=classify_args)
+        task_type = classification.task_type
+        if task_type in UNMIGRATED_FLOWS:
+            _write_json(".pairingbuddy/task.json", task)
         # ... (same workflow as below, based on task_type) ...
 
         # After successful completion:
@@ -140,8 +166,13 @@ human_guidance = curate_guidance(human_guidance, task)
 _cleanup_state_files()
 
 # Task classification
-task_classification = classify_task(task)
-task_type = task_classification.task_type  # "new_feature" | "bug_fix" | "refactoring" | "config_change"
+classify_args = {"project_root": _absolute_project_root(), "task": task}
+if _file_exists(".pairingbuddy/human-guidance.json"):
+    classify_args["human_guidance"] = _read_json(".pairingbuddy/human-guidance.json")
+classification = Workflow('pairingbuddy:classify', args=classify_args)
+task_type = classification.task_type  # "new_feature" | "bug_fix" | "refactoring" | "config_change" | "spike"
+if task_type in UNMIGRATED_FLOWS:
+    _write_json(".pairingbuddy/task.json", task)
 
 if task_type == "new_feature":
     # Full TDD workflow with coverage verification loop
@@ -294,6 +325,16 @@ After each refactor cycle:
 2. Human decides: continue, skip remaining, or stop
 3. Prevents infinite refactor loops
 
+### Task Classification Workflow
+
+Task classification runs as the `pairingbuddy:classify` workflow, started with the Workflow tool right after `_cleanup_state_files()`, in both the plan-execution path and the normal path. The `task_type` that routes the rest of the workflow is read from the workflow result.
+
+The `project_root` argument is always an absolute path to the project root. The `human_guidance` argument is read from `.pairingbuddy/human-guidance.json` if it exists, and is omitted from the arguments when that file does not exist.
+
+The classification result is held in context, and `task-classification.json` is no longer written.
+
+**Temporary bridge:** The flows that follow classification have not been migrated to workflows yet, and they still read `task.json`. The bridge is therefore scoped to `UNMIGRATED_FLOWS`, which currently lists all five task types (`new_feature`, `bug_fix`, `refactoring`, `config_change` and `spike`). Whenever `task_type` is in `UNMIGRATED_FLOWS`, the orchestrator writes `task.json` after classification, with one rule for the plan-execution path and the normal path. As each flow migrates, its task type leaves `UNMIGRATED_FLOWS`, and the whole bridge is removed in TB3.3.
+
 ### Plan Execution Mode
 
 When the task description references a plan MD file (produced by `/pairingbuddy:plan`), the orchestrator enters plan execution mode:
@@ -302,7 +343,7 @@ When the task description references a plan MD file (produced by `/pairingbuddy:
 2. **Parsing:** `_read_plan_tasks(plan_path)` extracts all tasks from the plan MD with their checkbox state, title, and full description
 3. **Visibility:** `_hydrate_claude_tasks(plan_tasks)` creates Claude Code Tasks (via TaskCreate) for all plan tasks. Completed tasks (checked) are marked as done. This gives the human a visible progress view within the session.
 4. **Iteration:** For each unchecked task, the orchestrator:
-   a. Writes `task.json` with the plan task's rich description
+   a. Holds the plan task's rich description as the task, and writes `task.json` only when `task_type in UNMIGRATED_FLOWS` (the temporary bridge described below)
    b. Runs the normal TDD workflow (curate guidance, cleanup, classify, implement)
    c. After successful completion, updates the MD checkbox (`- [ ]` → `- [x]`)
    d. Marks the Claude Code Task as completed

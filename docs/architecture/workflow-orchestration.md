@@ -45,6 +45,12 @@ Hard constraints behind this split:
 - Workflow scripts cannot read files.
 - Workflow resume only works within the same session.
 
+Calling workflows from the coding skill:
+
+- The skill classifies with `Workflow('pairingbuddy:classify')` and routes on the returned `task_type`.
+- If the tool reports the name as unknown, the skill retries with `scriptPath` set to `${CLAUDE_PLUGIN_ROOT}/workflows/classify.js` (or relative to the skill's base directory).
+- It never falls back to the Task tool.
+
 ## Durable vs In-Memory State
 
 Only these stay on disk. The skill reads them and passes them to workflows in `args`:
@@ -58,6 +64,12 @@ Only these stay on disk. The skill reads them and passes them to workflows in `a
 | Plan MD checkboxes | skill (plan execution mode; cross-session resume) |
 
 Everything else becomes script variables or `args`/return values: `task`, `task-classification`, `scenarios`, `tests`, `current-batch`, `test-state`, `code-state`, `*-issues`, `files-changed`, `coverage-report`, `all-tests-results`, `commit-result`, `docs-updated`, `spike-*`, `current-unit`, and the plan/design-ux intermediates. Workflows return re-passable objects, so the skill can feed a proposal or a remaining-work list straight back as the next run's `args`.
+
+The classification result and `task` are in-context values held by the skill, not files. `task-classification.json` is no longer written, and `task.json` exists only through the temporary bridge below.
+
+### Temporary bridge (until TB3.3)
+
+Flows not yet migrated still read `task.json`. After classification, the skill writes it only when `task_type in UNMIGRATED_FLOWS`, with one rule for both the plan-execution and normal paths. `UNMIGRATED_FLOWS` starts as all 5 types (`new_feature`, `bug_fix`, `refactoring`, `config_change`, `spike`). `bug_fix` leaves it at plan Task 11, each other type leaves as its flow migrates, and the whole bridge is removed in TB3.3.
 
 ## Human Review in the Skill
 
@@ -79,7 +91,7 @@ Naming: `workflows/<flow>-<stage>.js`, invoked as `pairingbuddy:<flow>-<stage>`.
 | # | Stretch | Agents | After it |
 |---|---|---|---|
 | 1 | curate-guidance | curate-guidance | **checkpoint**; skill writes `human-guidance.json` |
-| 2 | classify | classify-task | skill routes on `task_type` |
+| 2 | classify | classify-task | skill routes on `task_type` (result held in context) |
 | 3 | `bug-fix-enumerate` | enumerate-scenarios-and-test-cases | **checkpoint** (re-run with feedback until approved) |
 | 4 | `bug-fix-placeholders` | create-test-placeholders | **checkpoint** |
 | 5 | `bug-fix-red-green` | per test, sequential: implement-tests → implement-code (retry once), then run-all-tests | — |

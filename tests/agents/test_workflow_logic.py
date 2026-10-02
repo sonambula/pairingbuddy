@@ -1,6 +1,6 @@
 """Tests for workflow logic in the orchestrator skill.
 
-Tests that function calls in the workflow pseudocode resolve to registered agents.
+Tests that workflow pseudocode calls resolve to registered agents or existing workflows.
 """
 
 import ast
@@ -31,8 +31,8 @@ def extract_workflow_code() -> str | None:
     content = ORCHESTRATOR_SKILL.read_text()
 
     # Find the Workflow section
-    pattern = r"## Workflow\s*(.*?)(?=\n## |\Z)"
-    match = re.search(pattern, content, re.DOTALL)
+    pattern = r"^## Workflow[ \t]*$\s*(.*?)(?=\n## |\Z)"
+    match = re.search(pattern, content, re.DOTALL | re.MULTILINE)
     if not match:
         return None
 
@@ -47,46 +47,55 @@ def extract_workflow_code() -> str | None:
     return code_match.group(1).strip()
 
 
-def extract_function_calls(code: str) -> list[str]:
-    """Extract all function call names from Python code using AST."""
-    try:
-        tree = ast.parse(code)
-    except SyntaxError:
-        return []
-
-    calls = []
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Call):
-            if isinstance(node.func, ast.Name):
-                calls.append(node.func.id)
-            elif isinstance(node.func, ast.Attribute):
-                calls.append(node.func.attr)
-    return calls
-
-
 def python_name_to_agent_name(func_name: str) -> str:
     """Convert Python function name to agent name (underscores to hyphens)."""
     return func_name.replace("_", "-")
 
 
-def test_workflow_references_resolve_to_agents():
-    """Function calls in workflow that look like agent names must be registered."""
-    code = extract_workflow_code()
-    assert code is not None, "Could not extract workflow code from orchestrator skill"
+def find_unresolved_calls(code: str, registered_agents: set[str], workflows_dir: Path) -> list[str]:
+    """Return calls in workflow pseudocode that resolve to neither an agent nor a workflow.
 
-    function_calls = extract_function_calls(code)
-    registered_agents = get_registered_agent_names()
+    Workflow('pairingbuddy:<name>', ...) resolves when <workflows_dir>/<name>.js exists;
+    any other Workflow call (such as a non-literal first argument) is unresolved.
+    """
+    tree = ast.parse(code)
 
-    # All function calls must resolve to registered agents
-    # Exception: _ prefixed functions are orchestrator logic, not agents
     unresolved = []
-    for func_name in function_calls:
-        if func_name.startswith("_"):
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        if isinstance(node.func, ast.Name) and node.func.id == "Workflow":
+            first = node.args[0] if node.args else None
+            literal = first.value if isinstance(first, ast.Constant) else None
+            prefix = "pairingbuddy:"
+            if (
+                isinstance(literal, str)
+                and literal.startswith(prefix)
+                and (workflows_dir / f"{literal[len(prefix) :]}.js").is_file()
+            ):
+                continue
+            unresolved.append(f"Workflow({ast.unparse(first) if first else ''})")
+            continue
+        func_name = node.func.id if isinstance(node.func, ast.Name) else None
+        if func_name is None and isinstance(node.func, ast.Attribute):
+            func_name = node.func.attr
+        if func_name is None or func_name.startswith("_"):
             continue  # orchestrator-only functions use _ prefix
         agent_name = python_name_to_agent_name(func_name)
         if agent_name not in registered_agents:
             unresolved.append(f"{func_name} -> {agent_name}")
+    return unresolved
+
+
+def test_workflow_references_resolve_to_agents():
+    """Function calls in workflow must resolve to registered agents or existing workflows."""
+    code = extract_workflow_code()
+    assert code is not None, "Could not extract workflow code from orchestrator skill"
+
+    unresolved = find_unresolved_calls(
+        code, get_registered_agent_names(), PROJECT_ROOT / "workflows"
+    )
 
     assert not unresolved, (
-        f"Workflow calls functions that don't resolve to registered agents: {unresolved}"
+        f"Workflow calls must resolve to registered agents or existing workflows: {unresolved}"
     )
