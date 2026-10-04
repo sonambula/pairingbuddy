@@ -2,6 +2,7 @@
 
 import importlib.util
 import re
+from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
@@ -490,12 +491,12 @@ def test_checker_reports_each_violation(synthetic_script, mutate, checker, expec
     assert expected in problems[0], problems
 
 
-# ---- curate-guidance structure ----------------------------------------------
+# ---- shared workflow-script contract (curate-guidance, bug-fix-enumerate, -placeholders) ----
 
 
-def curate_body():
-    """curate-guidance.js outside generated blocks and meta, comments removed, normalized."""
-    raw = strip_generated_blocks(read_script("curate-guidance"))
+def script_body(name):
+    """A workflow script outside generated blocks and meta, comments removed, normalized."""
+    raw = strip_generated_blocks(read_script(name))
     raw = re.sub(r"/\*.*?\*/", "", raw, flags=re.DOTALL)
     raw = re.sub(r"(?m)(^|\s)//[^\n]*", r"\1", raw)
     return without_meta(normalize_js(raw))
@@ -531,16 +532,15 @@ def string_literals(text):
     return re.findall(r'"([^"]*)"', text)
 
 
-def check_require_args_project_root(text):
+def check_require_args(text, script, keys):
+    """requireArgs('<script>', [<keys>]) with exactly these keys is called before run()."""
+    keys_js = ", ".join(f'"{key}"' for key in keys)
+    expected = f'requireArgs("{script}", [{keys_js}])'
     run = re.search(r"\brun\(", text)
-    calls = list(re.finditer(r"\brequireArgs\(", text))
     assert run, "run( is never called"
-    assert calls, "requireArgs( is never called"
-    for call in calls:
-        args = text[call.end() : balanced_end(text, call.end() - 1)]
-        if "project_root" in string_literals(args) and call.start() < run.start():
-            return
-    raise AssertionError('no requireArgs(..."project_root"...) call before run(')
+    call = re.search(re.escape(expected), text)
+    assert call, f"no `{expected}` call"
+    assert call.start() < run.start(), f"run( is called before `{expected}`"
 
 
 HUMAN_GUIDANCE_FALLBACK = "ARGS.human_guidance || { guidance: [] }"
@@ -597,7 +597,8 @@ def truthy_guard(own):
     return rf"(?:!!)?\(?(?:ARGS && )?(?:{own})\)?"
 
 
-def check_rerun_block_guarded_with_revise(text, block_name):
+def check_literal_only_in_guard(text, block_name, literal):
+    """The exact string literal appears once, inside the branch guarded by its own arg."""
     branches = branch_guards(text, block_name)
     assert branches, f"block({block_name!r}, ...) is not inside a guarded branch"
     alias = re.search(rf"\bconst (\w+) = ARGS\.{block_name}\b", text)
@@ -606,28 +607,178 @@ def check_rerun_block_guarded_with_revise(text, block_name):
         assert re.fullmatch(truthy_guard(own), condition), (
             f"block({block_name!r}) is guarded by {condition!r}, not by its own arg"
         )
-        without_blocks = re.sub(r'\bblock\("\w+", ', "(", body)
-        instructions = [lit for lit in string_literals(without_blocks) if " " in lit.strip()]
-        assert instructions, f"guarded {block_name} branch has no instruction string literal"
-
-
-def check_curate_run_call_and_return(text):
-    match = re.search(
-        r'\bconst proposal = await run\("curate-guidance", "Curate", inputs, HUMAN_GUIDANCE\)',
-        text,
+        assert literal in string_literals(body), (
+            f"guarded {block_name} branch lacks the literal {literal!r}"
+        )
+    outside = text
+    for _, body in branches:
+        outside = outside.replace(body, "", 1)
+    assert not re.search(rf'\bblock\("{block_name}", ', outside), (
+        f"block({block_name!r}, ...) is also built outside its guarded branch"
     )
-    assert match, (
-        "no `const proposal = await run('curate-guidance', 'Curate', inputs, HUMAN_GUIDANCE)`"
+    assert string_literals(text).count(literal) == len(branches), (
+        f"literal {literal!r} also appears outside the guarded {block_name} branch"
+    )
+
+
+def schema_const(name):
+    """JS constant a generated schema is declared as, e.g. 'human-guidance' -> HUMAN_GUIDANCE."""
+    return name.upper().replace("-", "_")
+
+
+def check_run_call_and_return(text, contract):
+    schema = schema_const(contract.schema)
+    run_call = (
+        rf'\bconst {contract.result} = await run\("{contract.agent}", "{contract.phase}", '
+        rf"inputs, {schema}\)"
+    )
+    assert re.search(run_call, text), (
+        f"no `const {contract.result} = await run('{contract.agent}', '{contract.phase}', "
+        f"inputs, {schema})`"
     )
     assert len(re.findall(r"\brun\(", text)) == 1, "run( must be called exactly once"
-    returns = re.findall(r"\breturn\b(?: \{[^}]*\}|[^;}]*)", text)
-    assert [r.strip() for r in returns] == ["return { proposal }"], f"returns are {returns}"
+    code = re.sub(r'"[^"]*"', '""', text)
+    returns = re.findall(r"\breturn\b(?: \{[^}]*\}|[^;}]*)", code)
+    assert [r.strip() for r in returns] == [contract.returns], f"returns are {returns}"
 
 
-def check_curate_meta_phases(text):
+def check_required_input_blocks(text, blocks):
+    """Each exact block(...) call is present and sits outside every guarded branch."""
+    guarded_bodies = [body for _, body in guarded_branches(text)]
+    for call in blocks:
+        assert call in text, f"inputs lack `{call}`"
+        assert not any(call in body for body in guarded_bodies), f"`{call}` sits inside a guard"
+
+
+def check_meta_phases(text, title):
     phases = top_level_fields(extract_meta(normalize_js(text))).get("phases")
-    assert phases == '[{ title: "Curate" }]', f"meta.phases is {phases}"
+    assert phases == f'[{{ title: "{title}" }}]', f"meta.phases is {phases}"
 
+
+def check_schemas_block(raw, schema_name):
+    """The generated schemas block declares exactly this schema and defines its constant."""
+    const = schema_const(schema_name)
+    markers = re.findall(r"// <generated:schemas([^>\n]*)>", raw)
+    assert [m.split() for m in markers] == [[schema_name]], f"schemas markers are {markers}"
+    block = next(generator.BLOCK.finditer(raw[raw.index("// <generated:schemas") :]))
+    assert re.search(rf"^const {const} = \{{", block.group(0), re.MULTILINE), (
+        f"schemas block does not declare const {const}"
+    )
+
+
+def check_existing_tests_sources(text):
+    """existing_tests comes from previous_proposal (re-run) or ARGS.existing_tests, each guarded."""
+    calls = re.findall(r'\bblock\("existing_tests", ([^)]*)\)', text)
+    assert "ARGS.previous_proposal" in calls, (
+        'no block("existing_tests", ARGS.previous_proposal) call'
+    )
+    for value in calls:
+        assert value in ("ARGS.previous_proposal", "ARGS.existing_tests"), (
+            f"block('existing_tests', {value}) is not fed from previous_proposal or existing_tests"
+        )
+        arg = value.removeprefix("ARGS.")
+        guarded = [
+            condition
+            for condition, body in guarded_branches(text)
+            if f'block("existing_tests", {value})' in body
+        ]
+        assert guarded, f"block('existing_tests', {value}) is not inside a guarded branch"
+        assert all(re.fullmatch(truthy_guard(rf"ARGS\.{arg}"), c) for c in guarded), (
+            f"block('existing_tests', {value}) is guarded by {guarded}, not by ARGS.{arg}"
+        )
+
+
+@dataclass(frozen=True)
+class ScriptContract:
+    require: list
+    agent: str
+    phase: str
+    schema: str
+    result: str
+    returns: str
+    inputs: list
+    revise: dict
+    keep_existing: str = ""
+
+
+HUMAN_FEEDBACK_REVISE = (
+    "Apply the human feedback above to the proposal; where it conflicts with your own "
+    "judgment, the feedback wins."
+)
+HUMAN_GUIDANCE_INPUT = 'block("human_guidance", ARGS.human_guidance || { guidance: [] })'
+RECONCILE_INSTRUCTION = (
+    "Reconcile the placeholder tests you already wrote with the feedback: "
+    "edit or remove them instead of adding duplicates."
+)
+
+KEEP_EXISTING_INSTRUCTION = (
+    "Return the complete tests list: keep the existing entries, edited or removed as "
+    "instructed, and add the new ones; do not return only the entries you added."
+)
+
+SCRIPT_CONTRACTS = {
+    "curate-guidance": ScriptContract(
+        require=["project_root"],
+        agent="curate-guidance",
+        phase="Curate",
+        schema="human-guidance",
+        result="proposal",
+        returns="return { proposal }",
+        inputs=[],
+        revise={
+            "previous_proposal": (
+                "Start from the previous proposal above and revise it instead of curating "
+                "from scratch."
+            ),
+            "human_feedback": (
+                "Apply the human feedback above to the proposal; where it conflicts with your "
+                "own classification, the feedback wins."
+            ),
+        },
+    ),
+    "bug-fix-enumerate": ScriptContract(
+        require=["project_root", "task", "test_config"],
+        agent="enumerate-scenarios-and-test-cases",
+        phase="Enumerate",
+        schema="scenarios",
+        result="scenarios",
+        returns="return { proposal: scenarios }",
+        inputs=[
+            'block("task", ARGS.task)',
+            'block("test_config", ARGS.test_config)',
+            HUMAN_GUIDANCE_INPUT,
+        ],
+        revise={
+            "previous_proposal": (
+                "Start from the previous proposal above and revise it instead of enumerating "
+                "from scratch."
+            ),
+            "human_feedback": HUMAN_FEEDBACK_REVISE,
+        },
+    ),
+    "bug-fix-placeholders": ScriptContract(
+        require=["project_root", "scenarios", "test_config"],
+        agent="create-test-placeholders",
+        phase="Placeholders",
+        schema="tests",
+        result="tests",
+        returns="return { proposal: tests }",
+        inputs=[
+            'block("scenarios", ARGS.scenarios)',
+            'block("test_config", ARGS.test_config)',
+            HUMAN_GUIDANCE_INPUT,
+        ],
+        revise={
+            "previous_proposal": (
+                "Start from the previous proposal above and revise it instead of creating "
+                "placeholders from scratch."
+            ),
+            "human_feedback": HUMAN_FEEDBACK_REVISE,
+        },
+        keep_existing=KEEP_EXISTING_INSTRUCTION,
+    ),
+}
+SHARED_SCRIPTS = pytest.mark.parametrize("script", SCRIPT_CONTRACTS, ids=SCRIPT_CONTRACTS.keys())
 
 BOOTSTRAP_CHECKS = {
     "fallback-feeds-human-guidance-block": check_human_guidance_fallback_feeds_block,
@@ -635,44 +786,24 @@ BOOTSTRAP_CHECKS = {
 }
 
 
-def test_require_args_project_root():
-    """require-args-project-root: requireArgs names project_root before run()."""
-    text = curate_body()
-
-    check_require_args_project_root(text)
-
-
 @pytest.mark.parametrize("check", BOOTSTRAP_CHECKS.values(), ids=BOOTSTRAP_CHECKS.keys())
 def test_bootstrap_without_human_guidance(check):
     """bootstrap-without-human-guidance: falls back to { guidance: [] }, never throws."""
-    text = curate_body()
+    text = script_body("curate-guidance")
 
     check(text)
 
 
-@pytest.mark.parametrize("block_name", ["previous_proposal", "human_feedback"])
-def test_rerun_blocks_and_revise_instruction(block_name):
-    """rerun-blocks-and-revise-instruction: rerun blocks guarded by their own arg."""
-    text = curate_body()
-
-    check_rerun_block_guarded_with_revise(text, block_name)
-
-
 def test_rerun_guard_rejects_inverted_condition():
-    """rerun-blocks-and-revise-instruction: an inverted guard is a defect, not a guard."""
-    control = curate_body()
+    """rerun-blocks-guarded-with-revise: an inverted guard is a defect, not a guard."""
+    control = script_body("curate-guidance")
+    literal = SCRIPT_CONTRACTS["curate-guidance"].revise["previous_proposal"]
     mutated = control.replace("if (ARGS.previous_proposal) {", "if (!ARGS.previous_proposal) {")
     assert mutated != control, "mutation did not apply"
-    check_rerun_block_guarded_with_revise(control, "previous_proposal")
+    check_literal_only_in_guard(control, "previous_proposal", literal)
 
     with pytest.raises(AssertionError, match="not by its own arg"):
-        check_rerun_block_guarded_with_revise(mutated, "previous_proposal")
-
-
-def test_run_call_and_return_shape():
-    """run-call-and-return-shape: exact run call, returns { proposal }, phases Curate."""
-    check_curate_run_call_and_return(curate_body())
-    check_curate_meta_phases(read_script("curate-guidance"))
+        check_literal_only_in_guard(mutated, "previous_proposal", literal)
 
 
 def check_task_block_guarded_by_own_arg(text):
@@ -703,8 +834,75 @@ def check_when_to_use_lists_optional_task(text):
 
 def test_optional_task_block():
     """optional-task-block: task block is optional, guarded by its own arg, documented."""
-    check_task_block_guarded_by_own_arg(curate_body())
+    check_task_block_guarded_by_own_arg(script_body("curate-guidance"))
     check_when_to_use_lists_optional_task(read_script("curate-guidance"))
+
+
+@SHARED_SCRIPTS
+def test_shared_require_args_before_run(script):
+    """shared-contract: require-args-before-run - requireArgs names the script's own args."""
+    text = script_body(script)
+
+    check_require_args(text, script, SCRIPT_CONTRACTS[script].require)
+
+
+@SHARED_SCRIPTS
+@pytest.mark.parametrize("block_name", ["previous_proposal", "human_feedback"])
+def test_shared_rerun_blocks_guarded_with_revise(script, block_name):
+    """shared-contract: rerun-blocks-guarded-with-revise - rerun blocks sit in their own guard."""
+    text = script_body(script)
+    revise = SCRIPT_CONTRACTS[script].revise[block_name]
+
+    check_literal_only_in_guard(text, block_name, revise)
+
+
+@SHARED_SCRIPTS
+def test_shared_run_call_and_return_shape(script):
+    """shared-contract: run-call-and-return-shape - one exact run call, exact return."""
+    text = script_body(script)
+    contract = SCRIPT_CONTRACTS[script]
+
+    check_run_call_and_return(text, contract)
+    check_required_input_blocks(text, contract.inputs)
+
+
+@SHARED_SCRIPTS
+def test_shared_meta_phases(script):
+    """shared-contract: meta-phases - meta.phases is exactly the script's single phase."""
+    text = read_script(script)
+
+    check_meta_phases(text, SCRIPT_CONTRACTS[script].phase)
+
+
+@SHARED_SCRIPTS
+def test_shared_schemas_block(script):
+    """shared-contract: schemas-block - declares exactly the script's own schema constant."""
+    text = read_script(script)
+
+    check_schemas_block(text, SCRIPT_CONTRACTS[script].schema)
+
+
+# ---- bug-fix-workflow scripts (enumerate and placeholders) --------
+
+
+def test_bug_fix_placeholders_existing_tests_from_previous_proposal():
+    """bug-fix-placeholders: placeholders-existing-tests-from-previous-proposal - fed on re-run."""
+    check_existing_tests_sources(script_body("bug-fix-placeholders"))
+
+
+def test_bug_fix_placeholders_reconcile_instruction():
+    """bug-fix-placeholders: placeholders-reconcile-instruction - exact literal in guard."""
+    text = script_body("bug-fix-placeholders")
+
+    check_literal_only_in_guard(text, "human_feedback", RECONCILE_INSTRUCTION)
+
+
+def test_bug_fix_placeholders_keep_existing_instruction():
+    """bug-fix-placeholders: placeholders-keep-existing-instruction - exact literal in guard."""
+    text = script_body("bug-fix-placeholders")
+    literal = SCRIPT_CONTRACTS["bug-fix-placeholders"].keep_existing
+
+    check_literal_only_in_guard(text, "previous_proposal", literal)
 
 
 NON_SPIKE_PATHS = [path for path in SCRIPT_PATHS if path.stem not in KNOWN_SPIKE_FILES]

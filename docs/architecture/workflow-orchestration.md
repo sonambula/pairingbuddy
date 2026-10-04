@@ -163,7 +163,7 @@ const SCENARIOS = { ... }
   - Sync: generated blocks are in sync, checked through the generator's `process_path`.
   - Spike files `bug-fix-pilot.js` and `spike-probe.js` have no markers and are tolerated, with a per-file `whenToUse` exemption, until TB5.1 deletes them. Any other file without markers is flagged.
   - `classify.js` also gets construct-level structural checks. They normalize formatting and anchor each check to its construct; mutation probes confirmed they reject real defects.
-  - The forbidden-constructs check applies to every non-spike workflow. `curate-guidance.js` also gets construct-level checks, including re-run guards that a self-test proves reject inverted guards.
+  - The forbidden-constructs check applies to every non-spike workflow. `curate-guidance.js` and the bug_fix workflows are checked through shared, contract-driven checks (`SCRIPT_CONTRACTS` in the test file), including re-run guards that a self-test proves reject inverted guards.
 - Node.js >= 18 is a hard requirement of the plugin (hooks) and of the tests. `tests/conftest.py` stops the session if it is missing, so no test skips for node.
 - Whether to add a mocked `agent()` harness is decided by an inline spike in slice 1 (U3).
 - Tests stay structural; agent behavior is not tested.
