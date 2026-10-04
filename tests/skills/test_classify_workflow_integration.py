@@ -25,6 +25,8 @@ from tests.agents.test_workflow_logic import (
 COMMAND_CODE = PROJECT_ROOT / "commands" / "code.md"
 CLASSIFY_WORKFLOW_NAME = "pairingbuddy:classify"
 TASK_TYPES = {"new_feature", "bug_fix", "refactoring", "config_change", "spike"}
+# bug_fix left the bridge when its flow migrated (plan Task 11)
+UNMIGRATED_TASK_TYPES = TASK_TYPES - {"bug_fix"}
 BRIDGE_MARKER = "TEMPORARY BRIDGE — removed in TB3.3"
 AUTHORIZATION_SENTENCE = (
     "Invoking /pairingbuddy:code authorizes the Workflow tool "
@@ -569,9 +571,10 @@ def check_unmigrated_constant() -> list[str]:
         value = ast.literal_eval(node.value)
     except ValueError:
         value = None
-    if not isinstance(value, (list, tuple, set, frozenset)) or set(value) != TASK_TYPES:
+    if not isinstance(value, (list, tuple, set, frozenset)) or set(value) != UNMIGRATED_TASK_TYPES:
         problems.append(
-            f"UNMIGRATED_FLOWS must contain exactly all task types {sorted(TASK_TYPES)}"
+            f"UNMIGRATED_FLOWS must contain exactly the unmigrated task types "
+            f"{sorted(UNMIGRATED_TASK_TYPES)}"
         )
     if "_is_migrated" in code:
         problems.append("a _is_migrated helper was introduced")

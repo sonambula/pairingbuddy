@@ -118,7 +118,7 @@ These functions handle coordination, human interaction, and control flow that do
 
 ```python
 # TEMPORARY BRIDGE — removed in TB3.3
-UNMIGRATED_FLOWS = ["new_feature", "bug_fix", "refactoring", "config_change", "spike"]
+UNMIGRATED_FLOWS = ["new_feature", "refactoring", "config_change", "spike"]
 
 # Plan execution mode: iterate through tasks from a plan MD file
 if _detect_plan_file(task):
@@ -220,14 +220,27 @@ if task_type == "new_feature":
         gaps = coverage.gaps  # Pass gaps to next iteration
 
 elif task_type == "bug_fix":
-    # Bug fix: add regression test first, then fix
-    scenarios = enumerate_scenarios_and_test_cases(task, test_config)  # describes the bug
-    tests = create_test_placeholders(scenarios, test_config)
-
-    for test in tests:
-        current_batch = [test]
-        test_state = implement_tests(current_batch, test_config)  # test should fail (reproduces bug)
-        code_state = implement_code(test_state, test_config)      # fix makes it pass
+    # Bug fix: enumerate scenarios, then create test placeholders, via workflows
+    enumerate_args = {
+        "project_root": _absolute_project_root(),
+        "task": task,
+        "test_config": _read_json(".pairingbuddy/test-config.json"),
+    }
+    if _file_exists(".pairingbuddy/human-guidance.json"):
+        enumerate_args["human_guidance"] = _read_json(".pairingbuddy/human-guidance.json")
+    enumeration = Workflow('pairingbuddy:bug-fix-enumerate', args=enumerate_args)
+    # Review loop
+    placeholders_args = {
+        "project_root": _absolute_project_root(),
+        "scenarios": enumeration.proposal,
+        "test_config": _read_json(".pairingbuddy/test-config.json"),
+    }
+    if _file_exists(".pairingbuddy/human-guidance.json"):
+        placeholders_args["human_guidance"] = _read_json(".pairingbuddy/human-guidance.json")
+    placeholders = Workflow('pairingbuddy:bug-fix-placeholders', args=placeholders_args)
+    # Review loop
+    # TEMPORARY — moved in Task 17, removed in Task 21
+    _stop("bug_fix migration frontier: RED-GREEN not yet migrated")
 
 elif task_type == "refactoring":
     # Refactoring: work on existing code/tests per task intent
@@ -344,7 +357,7 @@ The `project_root` argument is always an absolute path to the project root. The 
 
 The classification result is held in context, and `task-classification.json` is no longer written.
 
-**Temporary bridge:** The flows that follow classification have not been migrated to workflows yet, and they still read `task.json`. The bridge is therefore scoped to `UNMIGRATED_FLOWS`, which currently lists all five task types (`new_feature`, `bug_fix`, `refactoring`, `config_change` and `spike`). Whenever `task_type` is in `UNMIGRATED_FLOWS`, the orchestrator writes `task.json` after classification, with one rule for the plan-execution path and the normal path. As each flow migrates, its task type leaves `UNMIGRATED_FLOWS`, and the whole bridge is removed in TB3.3.
+**Temporary bridge:** Most flows that follow classification have not been migrated to workflows yet, and they still read `task.json`. The bridge is therefore scoped to `UNMIGRATED_FLOWS`, which currently lists four task types (`new_feature`, `refactoring`, `config_change` and `spike`). `bug_fix` has already left the set: it is migrated up to the test placeholders step and stops at the migration frontier, because the steps after it are not migrated yet. Whenever `task_type` is in `UNMIGRATED_FLOWS`, the orchestrator writes `task.json` after classification, with one rule for the plan-execution path and the normal path. As each flow migrates, its task type leaves `UNMIGRATED_FLOWS`, and the whole bridge is removed in TB3.3.
 
 ### Plan Execution Mode
 
@@ -354,7 +367,7 @@ When the task description references a plan MD file (produced by `/pairingbuddy:
 2. **Parsing:** `_read_plan_tasks(plan_path)` extracts all tasks from the plan MD with their checkbox state, title, and full description
 3. **Visibility:** `_hydrate_claude_tasks(plan_tasks)` creates Claude Code Tasks (via TaskCreate) for all plan tasks. Completed tasks (checked) are marked as done. This gives the human a visible progress view within the session.
 4. **Iteration:** For each unchecked task, the orchestrator:
-   a. Holds the plan task's rich description as the task, and writes `task.json` only when `task_type in UNMIGRATED_FLOWS` (the temporary bridge described below)
+   a. Holds the plan task's rich description as the task, and writes `task.json` only when `task_type in UNMIGRATED_FLOWS` (the temporary bridge described in Task Classification Workflow above)
    b. Runs the normal TDD workflow (curate guidance, cleanup, classify, implement)
    c. After successful completion, updates the MD checkbox (`- [ ]` → `- [x]`)
    d. Marks the Claude Code Task as completed
@@ -488,7 +501,7 @@ Stage workflows return a proposal and never talk to the human. The skill reviews
 
 1. Run the stage workflow and get the proposal.
 2. Present the proposal with `AskUserQuestion`, including all relevant details.
-3. On feedback, immediately append an entry to `.pairingbuddy/human-guidance.json` with `agent`, an ISO `timestamp`, `context` and `feedback`, then re-run the same stage workflow passing `human_feedback`, `previous_proposal` and the updated guidance in its args, and go back to step 2.
+3. On feedback, immediately append an entry to `.pairingbuddy/human-guidance.json` with `agent`, an ISO `timestamp`, `context` and `feedback`, then re-run the same stage workflow with the same args it was called with, adding `human_feedback` and `previous_proposal` and setting `human_guidance` to the re-read `.pairingbuddy/human-guidance.json`, and go back to step 2.
 4. On approval, pass the approved object to the next stage.
 5. On termination, stop the task with `_stop(...)` and do not run the next stage.
 

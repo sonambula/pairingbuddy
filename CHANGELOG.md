@@ -32,12 +32,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Bootstraps an empty guidance when none is given; on a re-run the previous proposal and the human feedback are added with an instruction to revise the proposal accordingly
   - Wiring into the coding skill comes in Task 7
 - `tests/skills/test_curate_guidance_integration.py`: structural tests for the curate-guidance wiring in the coding skill (workflow call and args at both sites, `## Review loop` section, verbatim proposal write) (TB1.2 Task 7)
-- `workflows/bug-fix-enumerate.js` and `workflows/bug-fix-placeholders.js`: the first two bug_fix workflows (dynamic workflows migration, TB1.3 Tasks 9-10); not wired into the skill yet (Task 11)
+- `workflows/bug-fix-enumerate.js` and `workflows/bug-fix-placeholders.js`: the first two bug_fix workflows (dynamic workflows migration, TB1.3 Tasks 9-10)
   - `bug-fix-enumerate.js`: args `project_root`, `task`, `test_config` (required), `human_guidance?`, `previous_proposal?`, `human_feedback?`; returns `{ proposal: scenarios }`
   - `bug-fix-placeholders.js`: args `project_root`, `scenarios`, `test_config` (required), `human_guidance?`, `existing_tests?`, `previous_proposal?`, `human_feedback?`; on a re-run passes `previous_proposal` as `existing_tests` and instructs the agent to reconcile the placeholders instead of duplicating them and to return the complete tests list; returns `{ proposal: tests }`
 
 ### Changed
 
+- The coding skill's bug_fix branch now runs `pairingbuddy:bug-fix-enumerate` and `pairingbuddy:bug-fix-placeholders` behind the Review loop, then stops explicitly at the migration frontier ("bug_fix migration frontier: RED-GREEN not yet migrated"; temporary until RED-GREEN is migrated) (TB1.3 Task 11)
+  - The skill passes `test_config` from `.pairingbuddy/test-config.json`; placeholders receive the approved scenarios; Review loop re-runs reuse the stage's full args
+  - `bug_fix` left `UNMIGRATED_FLOWS` and no longer writes `task.json`, `scenarios.json` or `tests.json`
+  - Added `tests/skills/test_bug_fix_workflow_integration.py`
 - Workflow structural checks in `tests/workflows/` are now contract-driven (`SCRIPT_CONTRACTS`) and shared across `curate-guidance.js` and the bug_fix workflows
 
 - The structural check for forbidden constructs in `tests/workflows/` now covers every non-spike workflow, not only `classify.js`

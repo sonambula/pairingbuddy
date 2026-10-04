@@ -69,7 +69,7 @@ The classification result and `task` are in-context values held by the skill, no
 
 ### Temporary bridge (until TB3.3)
 
-Flows not yet migrated still read `task.json`. After classification, the skill writes it only when `task_type in UNMIGRATED_FLOWS`, with one rule for both the plan-execution and normal paths. `UNMIGRATED_FLOWS` starts as all 5 types (`new_feature`, `bug_fix`, `refactoring`, `config_change`, `spike`). `bug_fix` leaves it at plan Task 11, each other type leaves as its flow migrates, and the whole bridge is removed in TB3.3.
+Flows not yet migrated still read `task.json`. After classification, the skill writes it only when `task_type in UNMIGRATED_FLOWS`, with one rule for both the plan-execution and normal paths. `UNMIGRATED_FLOWS` started as all 5 types and now lists four (`new_feature`, `refactoring`, `config_change`, `spike`): `bug_fix` left it at plan Task 11 and writes no `task.json`. Each other type leaves as its flow migrates, and the whole bridge is removed in TB3.3. Until RED-GREEN is migrated, the bug_fix branch stops at a temporary frontier after the approved placeholders ("bug_fix migration frontier: RED-GREEN not yet migrated").
 
 ## Human Review in the Skill
 
