@@ -165,7 +165,7 @@ const SCENARIOS = { ... }
   - `classify.js` also gets construct-level structural checks. They normalize formatting and anchor each check to its construct; mutation probes confirmed they reject real defects.
   - The forbidden-constructs check applies to every non-spike workflow. `curate-guidance.js` and the bug_fix workflows are checked through shared, contract-driven checks (`SCRIPT_CONTRACTS` in the test file), including re-run guards that a self-test proves reject inverted guards.
 - Node.js >= 18 is a hard requirement of the plugin (hooks) and of the tests. `tests/conftest.py` stops the session if it is missing, so no test skips for node.
-- Whether to add a mocked `agent()` harness is decided by an inline spike in slice 1 (U3).
+- Rule logic (retry once, GREEN-skip) is tested with a zero-dependency Node harness (`tests/workflows/harness/run_workflow.mjs`, driven from pytest) that mocks `agent()`, `phase()` and `log()` with scripted responses (U3 decided, Task 14). It proves control flow, not prompts or runtime scheduling, so static checks for the sequential loop and the U1 marker stay.
 - Tests stay structural; agent behavior is not tested.
 
 ## Hooks and Observability
@@ -190,6 +190,6 @@ const SCENARIOS = { ... }
 |---|---|---|
 | U1 | Skip GREEN when a new test already passes | Decide with Alberto |
 | U2 | Do hooks see agents inside workflows; what Solo renderer reads instead | Spike before slice 2 |
-| U3 | How to test JS workflows from pytest | Inline spike in slice 1 |
+| U3 | How to test JS workflows from pytest | Decided (Task 14): Node harness driven from pytest; static checks kept for ordering |
 | U4 | Where REFACTOR review granularity is configured | Decide with Alberto before slice 2 |
 | U5 | `agentType` stability; minimum Claude Code version | Settle at release |
